@@ -226,10 +226,13 @@ async function executeTool(toolCall, context) {
 const MAX_TOOL_ROUNDS = 5;
 
 export async function callMinimaxAPI(messageText, context = {}) {
-    const chatId = context.chatId || 'dm';
+    const chatId = context.chatId || `dm_${context.sender || 'unknown'}`;
     const senderName = context.senderName || context.sender || 'User';
 
-    const userContent = context.chatId
+    // Normalize context so executeTool always has a valid chatId
+    context = { ...context, chatId };
+
+    const userContent = context.chatId && !context.chatId.startsWith('dm_')
         ? `[${senderName}]: ${messageText}`
         : messageText;
     addToHistory(chatId, { role: 'user', content: userContent });
