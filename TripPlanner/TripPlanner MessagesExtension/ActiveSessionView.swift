@@ -6,11 +6,14 @@ class ActiveSessionViewModel: ObservableObject {
     @Published var state: ViewState = .loading
     @Published var session: APIService.ActiveSession?
 
-    let sessionID: String
     let participantID: String
 
-    init(sessionID: String, participantID: String) {
-        self.sessionID = sessionID
+    /// The sessionId returned from the server (= trip's chat_id)
+    var resolvedSessionID: String {
+        session?.sessionId ?? "unknown"
+    }
+
+    init(participantID: String) {
         self.participantID = participantID
     }
 
@@ -18,7 +21,6 @@ class ActiveSessionViewModel: ObservableObject {
         state = .loading
         do {
             session = try await APIService.shared.getActiveSession(
-                sessionID: sessionID,
                 participantID: participantID
             )
             state = .loaded
@@ -121,7 +123,7 @@ struct ActiveSessionView: View {
                         color: Theme.brandColor,
                         buttonText: "Fill In"
                     ) {
-                        onShowPreferences(viewModel.sessionID, viewModel.participantID)
+                        onShowPreferences(viewModel.resolvedSessionID, viewModel.participantID)
                     }
                 } else if let pref = session.preferenceStatus, pref.responseCount > 0 {
                     infoCard(
@@ -141,7 +143,7 @@ struct ActiveSessionView: View {
                         color: .orange,
                         buttonText: poll.userVote != nil ? "View Results" : "Vote Now"
                     ) {
-                        onShowVote(viewModel.sessionID, String(describing: "active"), viewModel.participantID)
+                        onShowVote(viewModel.resolvedSessionID, String(describing: "active"), viewModel.participantID)
                     }
                 }
 

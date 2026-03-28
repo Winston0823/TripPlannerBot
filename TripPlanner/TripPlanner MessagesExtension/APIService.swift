@@ -137,16 +137,17 @@ class APIService {
 
     struct ActiveSession: Codable {
         let hasTrip: Bool
+        let sessionId: String?
         let trip: TripInfo?
         let activePoll: VoteResponse?
         let needsPreferences: Bool
         let preferenceStatus: PreferenceSummary?
     }
 
-    func getActiveSession(sessionID: String, participantID: String) async throws -> ActiveSession {
+    func getActiveSession(participantID: String) async throws -> ActiveSession {
         if useMock { return mockActiveSession() }
 
-        let url = URL(string: "\(baseURL)/session/\(sessionID)/active?participant=\(participantID)")!
+        let url = URL(string: "\(baseURL)/participant/\(participantID)/active")!
         let (data, _) = try await URLSession.shared.data(from: url)
         return try JSONDecoder().decode(ActiveSession.self, from: data)
     }
@@ -156,6 +157,7 @@ class APIService {
     private func mockActiveSession() -> ActiveSession {
         ActiveSession(
             hasTrip: true,
+            sessionId: "mock-session",
             trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "preferences"),
             activePoll: mockVoteResponse(),
             needsPreferences: true,

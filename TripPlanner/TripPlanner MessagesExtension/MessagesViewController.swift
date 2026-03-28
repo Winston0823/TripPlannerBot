@@ -36,10 +36,6 @@ class MessagesViewController: MSMessagesAppViewController {
         removeChildren()
 
         let participantID = ParticipantID.derive(from: conversation.localParticipantIdentifier)
-        // Use the chat identifier as session ID so bot and extension share the same data
-        let sessionID = conversation.selectedMessage?.url.flatMap {
-            BubbleURL.parse(from: $0)?.sessionID
-        } ?? "default-session"
 
         // Tapped an existing message bubble
         if let msg = conversation.selectedMessage, let url = msg.url {
@@ -67,12 +63,12 @@ class MessagesViewController: MSMessagesAppViewController {
         // Expanded: if user chose a specific action, show that
         if let action = pendingAction {
             pendingAction = nil
-            showDirectAction(action, sessionID: sessionID, participantID: participantID, conversation: conversation)
+            showDirectAction(action, participantID: participantID, conversation: conversation)
             return
         }
 
         // Expanded default: smart landing page — auto-detect what bot has set up
-        let vm = ActiveSessionViewModel(sessionID: sessionID, participantID: participantID)
+        let vm = ActiveSessionViewModel(participantID: participantID)
         show(ActiveSessionView(
             viewModel: vm,
             onShowPreferences: { [weak self] sid, pid in
@@ -103,14 +99,16 @@ class MessagesViewController: MSMessagesAppViewController {
 
     // MARK: - Direct Action (from Compact buttons)
 
-    private func showDirectAction(_ action: ExpandedAction, sessionID: String, participantID: String, conversation: MSConversation) {
+    private func showDirectAction(_ action: ExpandedAction, participantID: String, conversation: MSConversation) {
         switch action {
         case .preferences:
+            let sessionID = "default-session"
             let vm = PreferenceViewModel(sessionID: sessionID, participantID: participantID)
             show(PreferenceCollectionView(viewModel: vm) { [weak self] in
                 self?.sendPreferenceBubble(sessionID: sessionID, conversation: conversation)
             })
         case .vote:
+            let sessionID = "default-session"
             let voteID = UUID().uuidString
             let vm = VenueVoteViewModel(sessionID: sessionID, voteID: voteID, participantID: participantID)
             show(VenueVoteView(viewModel: vm) { [weak self] in self?.dismiss() })

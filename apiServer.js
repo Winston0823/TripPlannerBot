@@ -8,7 +8,8 @@ import {
     recordVote, getVotesForPoll,
     upsertPreferences, getAggregatedPreferences, hasSubmittedPreferences,
     updatePollOptions, eliminateOption,
-    getPollsByTripId
+    getPollsByTripId,
+    getDb
 } from './database.js';
 
 dotenv.config();
@@ -283,6 +284,85 @@ app.post('/chat', async (req, res) => {
         console.error('Chat API error:', error.message);
         res.status(500).json({ error: 'AI service unavailable' });
     }
+});
+
+// --- Find active session by participant (Extension calls this on open) ---
+// The Extension doesn't know the chat_id, but it knows the participantID.
+// This finds the most recent trip that participant is in.
+app.get('/participant/:participantId/active', (req, res) => {
+    const { participantId } = req.params;
+
+    // Find all trips this participant is in
+    const participant = getDb().prepare(
+        'SELECT * FROM participants WHERE sender_id = ? ORDER BY created_at DESC LIMIT 1'
+    ).get(participantId);
+
+    if (!participant) {
+        return res.json({ hasTrip: false, activePoll: null, needsPreferences: false });
+    }
+
+    const trip = getTripById(participant.trip_id);
+    if (!trip) {
+        return res.json({ hasTrip: false, activePoll: null, needsPreferences: false });
+    }
+
+    // Get active poll
+    const activePoll = getActivePollByChatId(trip.chat_id);
+    let pollData = null;
+    if (activePoll) {
+        const allVotes = getVotesForPoll(activePoll.id);
+        const voteCounts = {};
+        let userVote = null;
+
+        for (const opt of activePoll.options) {
+            const optId = opt.emoji || opt.id || opt.text;
+            voteCounts[optId] = 0;
+        }
+        for (const v of allVotes) {
+            voteCounts[v.option_emoji] = (voteCounts[v.option_emoji] || 0) + 1;
+            if (v.participant_name === participant.name) {
+                userVote = v.option_emoji;
+            }
+        }
+
+        pollData = {
+            pollId: String(activePoll.id),
+            question: activePoll.question,
+            options: activePoll.options.map((opt, i) => ({
+                id: opt.emoji || `opt_${i}`,
+                name: opt.text,
+                category: opt.category || '',
+                description: opt.description || '',
+                url: opt.url || null,
+            })),
+            userVote,
+            closed: false,
+            voteCounts,
+        };
+    }
+
+    // Check preferences
+    const needsPrefs = !hasSubmittedPreferences(trip.id, participant.id);
+    const prefAgg = getAggregatedPreferences(trip.id);
+    const allParticipants = getParticipantsByTripId(trip.id);
+
+    res.json({
+        hasTrip: true,
+        sessionId: trip.chat_id,
+        trip: {
+            name: trip.name,
+            destination: trip.destination,
+            startDate: trip.start_date,
+            endDate: trip.end_date,
+            stage: trip.stage,
+        },
+        activePoll: pollData,
+        needsPreferences: needsPrefs,
+        preferenceStatus: {
+            responseCount: prefAgg.response_count || 0,
+            totalCount: allParticipants.length,
+        },
+    });
 });
 
 // --- Active items for a chat (Extension pulls this on open) ---
