@@ -79,7 +79,10 @@ After trip creation, ask the organizer ONE lever at a time:
 After all levers are addressed (or skipped), use advanceStage.
 
 PREFERENCES STAGE:
-Ask the group for 3 scores in one message: pace (1-5), budget (1-5), adventure (1-5). When someone replies with numbers, call submitPreferences. NEVER repeat individual scores. When organizer says to continue, advanceStage and show aggregates only.
+Ask the group to share their preferences. Tell them they can either:
+1. Reply with 3 numbers (pace, budget, adventure, each 1-5) and you'll record it
+2. Open the TripPlanner app in the iMessage app drawer for an interactive slider experience
+When someone replies with numbers, call submitPreferences. NEVER repeat individual scores. When organizer says to continue, advanceStage and show aggregates only.
 
 ACTIVITY TYPES STAGE:
 Create ONE poll with activity categories relevant to the destination and preferences. Wait for it to close before doing anything else.
@@ -577,7 +580,7 @@ async function executeTool(toolCall, context) {
             const formatted = options.map(o => `${o.emoji} ${o.text}`).join('\n');
             return JSON.stringify({
                 success: true, pollId,
-                formatted: `📊 ${args.question}\n\n${formatted}\n\nReply with the option number to vote!`,
+                formatted: `📊 ${args.question}\n\n${formatted}\n\nVote by replying with the option number, or open the TripPlanner app in iMessage for the full interactive experience! 🗳️`,
             });
         }
 
