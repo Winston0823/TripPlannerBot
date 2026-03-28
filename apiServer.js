@@ -754,6 +754,32 @@ app.get('/preferences/:sessionId', (req, res) => {
     res.type('html').send(html);
 });
 
+// --- Seed test data ---
+app.post('/seed-test-data', (req, res) => {
+    const existing = getTripByChatId('demo-trip');
+    if (existing) return res.json({ message: 'Test data already exists', pollUrl: `${BASE_URL}/vote/${existing.id}` });
+
+    const tripId = createTrip('demo-trip', 'Tokyo Trip', 'Tokyo, Japan', '2026-04-15', '2026-04-22', 'organizer');
+    createParticipant(tripId, 'organizer', 'Organizer', 'organizer');
+    createParticipant(tripId, 'alice', 'Alice', 'member');
+    createParticipant(tripId, 'bob', 'Bob', 'member');
+
+    const NUMBER_EMOJIS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
+    const options = [
+        { emoji: NUMBER_EMOJIS[0], text: 'Sukiyabashi Jiro', category: 'Sushi · $$$$', description: 'World-renowned omakase sushi experience' },
+        { emoji: NUMBER_EMOJIS[1], text: 'Ichiran Ramen', category: 'Ramen · $', description: 'Famous tonkotsu ramen with private booths' },
+        { emoji: NUMBER_EMOJIS[2], text: 'Gonpachi', category: 'Izakaya · $$', description: 'The Kill Bill restaurant — yakitori & atmosphere' },
+        { emoji: NUMBER_EMOJIS[3], text: 'Tsuta', category: 'Ramen · $$', description: 'Michelin-starred soba-based ramen' },
+    ];
+    const pollId = createPoll(tripId, 'poll_demo', 'Day 2 dinner — where should we eat?', options, 'venues');
+
+    res.json({
+        message: 'Test data created!',
+        voteUrl: `${BASE_URL}/vote/${pollId}`,
+        preferencesUrl: `${BASE_URL}/preferences/demo-trip`,
+    });
+});
+
 // --- Health check ---
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
