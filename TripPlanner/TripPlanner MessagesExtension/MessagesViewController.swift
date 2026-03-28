@@ -12,13 +12,7 @@ import CryptoKit
 
 class MessagesViewController: MSMessagesAppViewController {
 
-    private var pendingAction: ExpandedAction?
-
     // MARK: - Lifecycle
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-    }
 
     override func willBecomeActive(with conversation: MSConversation) {
         super.willBecomeActive(with: conversation)
@@ -37,7 +31,7 @@ class MessagesViewController: MSMessagesAppViewController {
 
         let participantID = ParticipantID.derive(from: conversation.localParticipantIdentifier)
 
-        // Tapped an existing message bubble
+        // Tapped a message bubble
         if let msg = conversation.selectedMessage, let url = msg.url {
             if let bubble = BubbleURL.parse(from: url) {
                 showBubble(bubble, participantID: participantID, conversation: conversation)
@@ -51,25 +45,17 @@ class MessagesViewController: MSMessagesAppViewController {
             }
         }
 
-        // Compact: show action buttons
+        // Compact: single button to open dashboard
         if style == .compact {
-            show(CompactView { [weak self] action in
-                self?.pendingAction = action
+            show(CompactView { [weak self] in
                 self?.requestPresentationStyle(.expanded)
             })
             return
         }
 
-        // Expanded: if user chose a specific action, show that
-        if let action = pendingAction {
-            pendingAction = nil
-            showDirectAction(action, participantID: participantID, conversation: conversation)
-            return
-        }
-
-        // Expanded default: smart landing page — auto-detect what bot has set up
-        let vm = ActiveSessionViewModel(participantID: participantID)
-        show(ActiveSessionView(
+        // Expanded: show trip dashboard
+        let vm = DashboardViewModel(participantID: participantID)
+        show(TripDashboardView(
             viewModel: vm,
             onShowPreferences: { [weak self] sid, pid in
                 self?.removeChildren()
@@ -85,38 +71,11 @@ class MessagesViewController: MSMessagesAppViewController {
                     self?.dismiss()
                 })
             },
-            onShowPoll: { [weak self] in
-                self?.removeChildren()
-                self?.show(PollCreatorView { poll in
-                    self?.sendPollMessage(poll, conversation: conversation, session: nil)
-                })
-            },
-            onExpand: { [weak self] in
-                self?.requestPresentationStyle(.expanded)
+            onShareTrip: { [weak self] in
+                guard let dash = vm.dashboard, let trip = dash.trip else { return }
+                self?.sendTripBubble(trip: trip, sessionID: vm.sessionID, conversation: conversation)
             }
         ))
-    }
-
-    // MARK: - Direct Action (from Compact buttons)
-
-    private func showDirectAction(_ action: ExpandedAction, participantID: String, conversation: MSConversation) {
-        switch action {
-        case .preferences:
-            let sessionID = "default-session"
-            let vm = PreferenceViewModel(sessionID: sessionID, participantID: participantID)
-            show(PreferenceCollectionView(viewModel: vm) { [weak self] in
-                self?.sendPreferenceBubble(sessionID: sessionID, conversation: conversation)
-            })
-        case .vote:
-            let sessionID = "default-session"
-            let voteID = UUID().uuidString
-            let vm = VenueVoteViewModel(sessionID: sessionID, voteID: voteID, participantID: participantID)
-            show(VenueVoteView(viewModel: vm) { [weak self] in self?.dismiss() })
-        case .poll:
-            show(PollCreatorView { [weak self] poll in
-                self?.sendPollMessage(poll, conversation: conversation, session: nil)
-            })
-        }
     }
 
     // MARK: - Bubble Routing
@@ -130,21 +89,22 @@ class MessagesViewController: MSMessagesAppViewController {
             guard let voteID = bubble.voteID else { return }
             let vm = VenueVoteViewModel(sessionID: bubble.sessionID, voteID: voteID, participantID: participantID)
             show(VenueVoteView(viewModel: vm) { [weak self] in self?.dismiss() })
-        case .poll:
+        case .poll, .dashboard:
             break
         }
     }
 
     // MARK: - Send Messages
 
-    private func sendPreferenceBubble(sessionID: String, conversation: MSConversation) {
+    private func sendTripBubble(trip: APIService.TripInfo, sessionID: String, conversation: MSConversation) {
         let message = MSMessage(session: MSSession())
         let layout = MSMessageTemplateLayout()
-        layout.caption = "Share Your Travel Preferences"
-        layout.subcaption = "Tap to fill in"
-        layout.image = makeImage(title: "Travel Preferences", subtitle: "Pace · Budget · Adventure")
-        message.url = BubbleURL.build(type: .preference, sessionID: sessionID)
+        layout.caption = trip.name
+        layout.subcaption = "\(trip.destination) · \(trip.startDate ?? "") → \(trip.endDate ?? "")"
+        layout.image = makeImage(title: trip.name, subtitle: trip.destination)
+        message.url = BubbleURL.build(type: .dashboard, sessionID: sessionID)
         message.layout = layout
+        message.summaryText = "\(trip.name) — \(trip.destination)"
         conversation.insert(message) { _ in }
         dismiss()
     }

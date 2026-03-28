@@ -58,11 +58,11 @@ class APIService {
         if let url = ProcessInfo.processInfo.environment["API_BASE_URL"], !url.isEmpty {
             return url
         }
-        // Fallback for development — update this when you have a stable URL
-        return "http://localhost:3001"
+        // Fallback: Railway production URL
+        return "https://glorious-nourishment-production.up.railway.app"
     }()
 
-    private let useMock = true  // Set to false when backend has real session data
+    private let useMock = false
 
     // MARK: - Preference Endpoints
 
@@ -152,7 +152,113 @@ class APIService {
         return try JSONDecoder().decode(ActiveSession.self, from: data)
     }
 
+    // MARK: - Dashboard
+
+    struct ItineraryItem: Codable {
+        let venueName: String
+        let time: String?
+        let type: String?
+        let bookingUrl: String?
+        let notes: String?
+    }
+
+    struct ItineraryDay: Codable, Identifiable {
+        let dayNumber: Int
+        let date: String?
+        let isFreeDay: Bool
+        let items: [ItineraryItem]
+        var id: Int { dayNumber }
+    }
+
+    struct StopInfo: Codable, Identifiable {
+        let name: String
+        let dayNumber: Int?
+        let confidence: String?
+        let type: String?
+        var id: String { name }
+    }
+
+    struct ParticipantInfo: Codable, Identifiable {
+        let name: String
+        let role: String?
+        var id: String { name }
+    }
+
+    struct PreferencesFull: Codable {
+        let avgPace: Double?
+        let avgBudget: Double?
+        let avgAdventure: Double?
+        let responseCount: Int
+        let totalCount: Int
+        let needsSubmission: Bool
+    }
+
+    struct PollInfo: Codable, Identifiable {
+        let pollId: String
+        let question: String
+        let options: [VenueOption]
+        let userVote: String?
+        let voteCounts: [String: Int]
+        let closed: Bool
+        let winningOption: String?
+        var id: String { pollId }
+    }
+
+    struct DashboardResponse: Codable {
+        let hasTrip: Bool
+        let sessionId: String?
+        let trip: TripInfo?
+        let participants: [ParticipantInfo]?
+        let itinerary: [ItineraryDay]?
+        let stops: [StopInfo]?
+        let preferences: PreferencesFull?
+        let activePolls: [PollInfo]?
+        let closedPolls: [PollInfo]?
+    }
+
+    func getDashboard(participantID: String) async throws -> DashboardResponse {
+        if useMock { return mockDashboard() }
+
+        let url = URL(string: "\(baseURL)/participant/\(participantID)/dashboard")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode(DashboardResponse.self, from: data)
+    }
+
     // MARK: - Mock Data
+
+    private func mockDashboard() -> DashboardResponse {
+        DashboardResponse(
+            hasTrip: true,
+            sessionId: "mock-session",
+            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "venues"),
+            participants: [
+                ParticipantInfo(name: "Stefan", role: "organizer"),
+                ParticipantInfo(name: "Alice", role: "member"),
+                ParticipantInfo(name: "Bob", role: "member"),
+            ],
+            itinerary: [
+                ItineraryDay(dayNumber: 1, date: "2026-04-15", isFreeDay: false, items: [
+                    ItineraryItem(venueName: "Arrive at Narita Airport", time: "14:00", type: "confirmed", bookingUrl: nil, notes: "Take Narita Express to Shinjuku"),
+                    ItineraryItem(venueName: "Ichiran Ramen", time: "19:00", type: "confirmed", bookingUrl: nil, notes: "Dinner"),
+                ]),
+                ItineraryDay(dayNumber: 2, date: "2026-04-16", isFreeDay: false, items: [
+                    ItineraryItem(venueName: "Senso-ji Temple", time: "10:00", type: "confirmed", bookingUrl: nil, notes: nil),
+                    ItineraryItem(venueName: "Sukiyabashi Jiro", time: "19:00", type: "confirmed", bookingUrl: "https://example.com", notes: "Reservation required"),
+                ]),
+                ItineraryDay(dayNumber: 3, date: "2026-04-17", isFreeDay: true, items: []),
+            ],
+            stops: [
+                StopInfo(name: "Senso-ji Temple", dayNumber: 2, confidence: "confirmed", type: "confirmed"),
+                StopInfo(name: "Shibuya Crossing", dayNumber: nil, confidence: "open", type: "proposed"),
+            ],
+            preferences: PreferencesFull(avgPace: 3.8, avgBudget: 2.5, avgAdventure: 4.2, responseCount: 3, totalCount: 5, needsSubmission: false),
+            activePolls: [PollInfo(pollId: "1", question: "Day 4 activity?", options: [
+                VenueOption(id: "1", name: "TeamLab", category: "Art", description: "Digital art museum", url: nil),
+                VenueOption(id: "2", name: "Akihabara", category: "Shopping", description: "Electronics & anime district", url: nil),
+            ], userVote: nil, voteCounts: ["1": 2, "2": 1], closed: false, winningOption: nil)],
+            closedPolls: [PollInfo(pollId: "2", question: "Day 2 dinner?", options: [], userVote: "1", voteCounts: [:], closed: true, winningOption: "Sukiyabashi Jiro")]
+        )
+    }
 
     private func mockActiveSession() -> ActiveSession {
         ActiveSession(

@@ -9,6 +9,8 @@ import {
     upsertPreferences, getAggregatedPreferences, hasSubmittedPreferences,
     updatePollOptions, eliminateOption,
     getPollsByTripId,
+    getItinerary,
+    getStopsByTripId,
     getDb
 } from './database.js';
 
@@ -284,6 +286,120 @@ app.post('/chat', async (req, res) => {
         console.error('Chat API error:', error.message);
         res.status(500).json({ error: 'AI service unavailable' });
     }
+});
+
+// --- Dashboard endpoint (Extension main view) ---
+app.get('/participant/:participantId/dashboard', (req, res) => {
+    const { participantId } = req.params;
+
+    const participant = getDb().prepare(
+        'SELECT * FROM participants WHERE sender_id = ? ORDER BY created_at DESC LIMIT 1'
+    ).get(participantId);
+
+    if (!participant) {
+        return res.json({ hasTrip: false });
+    }
+
+    const trip = getTripById(participant.trip_id);
+    if (!trip) {
+        return res.json({ hasTrip: false });
+    }
+
+    // Participants
+    const allParticipants = getParticipantsByTripId(trip.id);
+
+    // Itinerary
+    const itinerary = getItinerary(trip.id);
+
+    // Stops
+    const stops = getStopsByTripId(trip.id);
+
+    // Preferences
+    const prefAgg = getAggregatedPreferences(trip.id);
+    const needsPrefs = !hasSubmittedPreferences(trip.id, participant.id);
+
+    // Polls
+    const allPolls = getPollsByTripId(trip.id);
+    const activePolls = [];
+    const closedPolls = [];
+
+    for (const poll of allPolls) {
+        const allVotes = getVotesForPoll(poll.id);
+        const voteCounts = {};
+        let userVote = null;
+
+        for (const opt of poll.options) {
+            const optId = opt.emoji || opt.id || opt.text;
+            voteCounts[optId] = 0;
+        }
+        for (const v of allVotes) {
+            voteCounts[v.option_emoji] = (voteCounts[v.option_emoji] || 0) + 1;
+            if (v.participant_name === participant.name) {
+                userVote = v.option_emoji;
+            }
+        }
+
+        const pollData = {
+            pollId: String(poll.id),
+            question: poll.question,
+            options: poll.options.map((opt, i) => ({
+                id: opt.emoji || `opt_${i}`,
+                name: opt.text,
+                category: opt.category || '',
+                description: opt.description || '',
+                url: opt.url || null,
+            })),
+            userVote,
+            voteCounts,
+        };
+
+        if (poll.status === 'open') {
+            activePolls.push({ ...pollData, closed: false });
+        } else {
+            closedPolls.push({ ...pollData, closed: true, winningOption: poll.winning_option });
+        }
+    }
+
+    res.json({
+        hasTrip: true,
+        sessionId: trip.chat_id,
+        trip: {
+            name: trip.name,
+            destination: trip.destination,
+            startDate: trip.start_date,
+            endDate: trip.end_date,
+            stage: trip.stage,
+        },
+        participants: allParticipants.map(p => ({ name: p.name, role: p.role })),
+        itinerary: itinerary.map(day => ({
+            dayNumber: day.day_number,
+            date: day.date,
+            isFreeDay: day.is_free_day,
+            items: day.items.map(item => ({
+                venueName: item.venue_name,
+                time: item.time,
+                type: item.type,
+                bookingUrl: item.booking_url,
+                notes: item.notes,
+            })),
+        })),
+        stops: stops.map(s => ({
+            name: s.name,
+            dayNumber: s.day_number,
+            confidence: s.confidence,
+            type: s.type,
+        })),
+        preferences: {
+            avgPace: prefAgg.avg_pace,
+            avgBudget: prefAgg.avg_budget,
+            avgAdventure: prefAgg.avg_adventure,
+            responseCount: prefAgg.response_count || 0,
+            totalCount: allParticipants.length,
+            needsSubmission: needsPrefs,
+        },
+        activePolls,
+        closedPolls,
+    });
 });
 
 // --- Find active session by participant (Extension calls this on open) ---

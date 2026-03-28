@@ -6,6 +6,7 @@ enum BubbleType: String {
     case preference
     case vote
     case poll // legacy PoC polls
+    case dashboard
 }
 
 /// Parses MSMessage.url to determine bubble type and extract metadata
