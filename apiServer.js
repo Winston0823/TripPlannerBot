@@ -17,7 +17,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.API_PORT || 3001;
+const PORT = process.env.PORT || process.env.API_PORT || 3001;
 
 // --- Helpers ---
 
