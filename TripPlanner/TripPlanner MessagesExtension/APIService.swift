@@ -62,7 +62,7 @@ class APIService {
         return "http://localhost:3001"
     }()
 
-    private let useMock = false
+    private let useMock = true  // Set to false when backend has real session data
 
     // MARK: - Preference Endpoints
 
@@ -120,7 +120,48 @@ class APIService {
         return try JSONDecoder().decode(APISuccess.self, from: data)
     }
 
+    // MARK: - Active Session (what to show when user opens Extension)
+
+    struct TripInfo: Codable {
+        let name: String
+        let destination: String
+        let startDate: String?
+        let endDate: String?
+        let stage: String?
+    }
+
+    struct PreferenceSummary: Codable {
+        let responseCount: Int
+        let totalCount: Int
+    }
+
+    struct ActiveSession: Codable {
+        let hasTrip: Bool
+        let trip: TripInfo?
+        let activePoll: VoteResponse?
+        let needsPreferences: Bool
+        let preferenceStatus: PreferenceSummary?
+    }
+
+    func getActiveSession(sessionID: String, participantID: String) async throws -> ActiveSession {
+        if useMock { return mockActiveSession() }
+
+        let url = URL(string: "\(baseURL)/session/\(sessionID)/active?participant=\(participantID)")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode(ActiveSession.self, from: data)
+    }
+
     // MARK: - Mock Data
+
+    private func mockActiveSession() -> ActiveSession {
+        ActiveSession(
+            hasTrip: true,
+            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "preferences"),
+            activePoll: mockVoteResponse(),
+            needsPreferences: true,
+            preferenceStatus: PreferenceSummary(responseCount: 2, totalCount: 5)
+        )
+    }
 
     private func mockPreferenceStatus() -> PreferenceStatus {
         PreferenceStatus(responded: false, responseCount: 3, totalCount: 5)

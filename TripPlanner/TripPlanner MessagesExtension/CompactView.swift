@@ -29,8 +29,9 @@ struct CompactView: View {
                 color: .blue
             ) { onAction(.poll) }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
     }
 }
 
@@ -42,17 +43,16 @@ struct CompactButton: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
+            VStack(spacing: 4) {
                 Image(systemName: icon)
                     .font(.system(size: 22))
                 Text(label)
                     .font(.system(size: 11, weight: .medium))
             }
             .foregroundColor(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
+            .frame(width: 80, height: 55)
             .background(color)
-            .cornerRadius(Theme.buttonCornerRadius)
+            .cornerRadius(12)
         }
     }
 }
