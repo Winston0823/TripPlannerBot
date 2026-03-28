@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import { onDirectMessage, onGroupMessage, sendToGroupChat } from './messageHandlers.js';
 import { geminiResearch, appleMapSearch } from './tools.js';
 import { startExtensionWatcher, stopExtensionWatcher } from './extensionWatcher.js';
+import { startApiServer } from './apiServer.js';
 import {
     STAGES,
     createTrip, getTripByChatId,
@@ -875,6 +876,9 @@ sdk.startWatching({
         console.error('iMessage SDK Error:', error);
     },
 });
+
+// --- API Server for iMessage extension ---
+startApiServer();
 
 // --- Extension watcher: receives poll results from the iMessage extension ---
 startExtensionWatcher((pollResult) => {

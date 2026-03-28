@@ -52,10 +52,17 @@ struct VenueSuggestion: Codable {
 class APIService {
     static let shared = APIService()
 
-    // TODO: Replace with actual backend URL when deployed
-    private let baseURL = "https://your-backend-url.com/api"
+    // Set via Xcode: Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables
+    // Add: API_BASE_URL = https://your-ngrok-url.ngrok-free.app
+    private let baseURL: String = {
+        if let url = ProcessInfo.processInfo.environment["API_BASE_URL"], !url.isEmpty {
+            return url
+        }
+        // Fallback for development — update this when you have a stable URL
+        return "http://localhost:3001"
+    }()
 
-    private let useMock = true // Toggle for development
+    private let useMock = false
 
     // MARK: - Preference Endpoints
 
