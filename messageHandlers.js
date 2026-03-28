@@ -11,7 +11,6 @@ const BOT_TRIGGER = /@(?:bot|shyt)/i;
 const OVERVIEW_CMD = /@shyt\s+overview/i;
 
 // --- AppleScript group chat fix ---
-// The SDK uses `chat id "chatXXX"` but AppleScript needs `chat id "iMessage;+;chatXXX"`
 export function sendToGroupChat(chatId, text) {
     const escapedText = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const applescriptId = `iMessage;+;${chatId}`;
@@ -25,7 +24,6 @@ end tell`;
         console.log(`Sent to group ${chatId}`);
     } catch (error) {
         console.error(`Failed to send to group ${chatId}:`, error.message);
-        // Fallback: try SDK's default method
         return sdk.send(chatId, text);
     }
 }
@@ -88,19 +86,28 @@ export const onDirectMessage = async (msg) => {
 export const onGroupMessage = async (msg) => {
     console.log(`Group message in ${msg.chatId} from ${msg.sender}: ${msg.text}`);
 
+    // Handle @shyt overview command
     if (OVERVIEW_CMD.test(msg.text)) {
         const overview = buildOverviewMessage(msg.chatId);
         sendToGroupChat(msg.chatId, overview);
         return;
     }
 
-    if (!BOT_TRIGGER.test(msg.text)) return;
-
+    const isDirectlyAddressed = BOT_TRIGGER.test(msg.text);
     const cleanedText = msg.text.replace(BOT_TRIGGER, '').trim();
+
+    // Feed ALL messages to the LLM for context, but flag whether it was @'d
     const response = await callMinimaxAPI(cleanedText, {
         chatId: msg.chatId,
         sender: msg.sender,
         senderName: msg.senderName,
+        addressed: isDirectlyAddressed,
     });
-    sendToGroupChat(msg.chatId, response);
+
+    // Only send a reply if the bot was @'d OR the LLM decided to respond
+    if (isDirectlyAddressed) {
+        sendToGroupChat(msg.chatId, response);
+    }
+    // If not addressed, the message is stored in conversation history
+    // but the bot stays silent
 };

@@ -11,7 +11,8 @@ import {
     getPollsByTripId,
     getItinerary,
     getStopsByTripId,
-    getDb
+    getDb,
+    addConversationMessage, getConversationHistory, trimConversationHistory
 } from './database.js';
 
 dotenv.config();
@@ -241,8 +242,7 @@ function getOpenAI() {
     return openai;
 }
 
-const chatHistories = new Map();
-const MAX_HISTORY = 20;
+const MAX_CHAT_HISTORY = 20;
 
 const CHAT_SYSTEM_PROMPT = `You are a trip planning assistant in an iMessage group chat. Help groups plan trips together.
 
@@ -258,16 +258,11 @@ app.post('/chat', async (req, res) => {
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     const sessionKey = chatId || 'default';
-    if (!chatHistories.has(sessionKey)) {
-        chatHistories.set(sessionKey, []);
-    }
-    const history = chatHistories.get(sessionKey);
-
     const userContent = senderName ? `[${senderName}]: ${message}` : message;
-    history.push({ role: 'user', content: userContent });
-    if (history.length > MAX_HISTORY) {
-        history.splice(0, history.length - MAX_HISTORY);
-    }
+    addConversationMessage(sessionKey, 'user', userContent);
+    trimConversationHistory(sessionKey, MAX_CHAT_HISTORY);
+
+    const history = getConversationHistory(sessionKey, MAX_CHAT_HISTORY);
 
     try {
         const response = await getOpenAI().chat.completions.create({
@@ -279,7 +274,7 @@ app.post('/chat', async (req, res) => {
         });
 
         const reply = response.choices[0].message.content;
-        history.push({ role: 'assistant', content: reply });
+        addConversationMessage(sessionKey, 'assistant', reply);
 
         res.json({ reply });
     } catch (error) {

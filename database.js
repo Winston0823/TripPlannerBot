@@ -135,6 +135,15 @@ function initializeDatabase() {
             eliminated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (trip_id) REFERENCES trips(id)
         );
+
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_conv_msg_chat ON conversation_messages(chat_id, created_at);
     `);
 
     migrate();
@@ -219,6 +228,24 @@ function migrate() {
             }
         }
         setSchemaVersion(1);
+    }
+
+    if (version < 2) {
+        // Add conversation_messages table for persistent chat history
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_messages'").get();
+        if (!tables) {
+            db.exec(`
+                CREATE TABLE conversation_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX idx_conv_msg_chat ON conversation_messages(chat_id, created_at);
+            `);
+        }
+        setSchemaVersion(2);
     }
 }
 
@@ -482,6 +509,31 @@ export const getItinerary = (trip_id) => {
     }));
 };
 
+// --- Itinerary helpers ---
+
+export const clearItinerary = (trip_id) => {
+    const dayIds = db.prepare('SELECT id FROM itinerary_days WHERE trip_id = ?').all(trip_id).map(r => r.id);
+    for (const dayId of dayIds) {
+        db.prepare('DELETE FROM itinerary_items WHERE day_id = ?').run(dayId);
+    }
+    db.prepare('DELETE FROM itinerary_days WHERE trip_id = ?').run(trip_id);
+};
+
+export const getItineraryDay = (trip_id, day_number) => {
+    const day = db.prepare(
+        'SELECT * FROM itinerary_days WHERE trip_id = ? AND day_number = ?'
+    ).get(trip_id, day_number);
+    if (!day) return null;
+    const items = db.prepare(
+        'SELECT * FROM itinerary_items WHERE day_id = ? ORDER BY sort_order'
+    ).all(day.id);
+    return { ...day, is_free_day: !!day.is_free_day, items };
+};
+
+export const clearItineraryDay = (day_id) => {
+    db.prepare('DELETE FROM itinerary_items WHERE day_id = ?').run(day_id);
+};
+
 // --- Eliminated options ---
 
 export const eliminateOption = (trip_id, stage, option_value) => {
@@ -536,6 +588,33 @@ export const deleteTrip = (trip_id) => {
     db.prepare('DELETE FROM eliminated_options WHERE trip_id = ?').run(trip_id);
     db.prepare('DELETE FROM participants WHERE trip_id = ?').run(trip_id);
     db.prepare('DELETE FROM trips WHERE id = ?').run(trip_id);
+};
+
+// --- Conversation History ---
+
+export const addConversationMessage = (chatId, role, content) => {
+    db.prepare(
+        'INSERT INTO conversation_messages (chat_id, role, content) VALUES (?, ?, ?)'
+    ).run(chatId, role, content);
+};
+
+export const getConversationHistory = (chatId, limit = 20) => {
+    // Get the last N messages, returned in chronological order
+    return db.prepare(`
+        SELECT role, content FROM (
+            SELECT id, role, content FROM conversation_messages
+            WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+        ) sub ORDER BY id ASC
+    `).all(chatId, limit);
+};
+
+export const trimConversationHistory = (chatId, keep = 20) => {
+    db.prepare(`
+        DELETE FROM conversation_messages WHERE chat_id = ? AND id NOT IN (
+            SELECT id FROM conversation_messages WHERE chat_id = ?
+            ORDER BY created_at DESC, id DESC LIMIT ?
+        )
+    `).run(chatId, chatId, keep);
 };
 
 export const getDb = () => db;

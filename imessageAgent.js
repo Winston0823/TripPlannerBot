@@ -1,8 +1,10 @@
 import { IMessageSDK } from '@photon-ai/imessage-kit';
+import axios from 'axios';
+import { AdvancedIMessageKit, isPollMessage, isPollVote, parsePollVotes, parsePollDefinition } from '@photon-ai/advanced-imessage-kit';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 import { onDirectMessage, onGroupMessage, sendToGroupChat } from './messageHandlers.js';
-import { geminiResearch, appleMapSearch } from './tools.js';
+import { geminiResearch, appleMapSearch, generateItineraryPlan, editItineraryDayPlan } from './tools.js';
 import { startExtensionWatcher, stopExtensionWatcher } from './extensionWatcher.js';
 import { startApiServer } from './apiServer.js';
 import {
@@ -17,9 +19,11 @@ import {
     createStop, getStopsByTripId, updateStop,
     getAggregatedPreferences, getPreferenceVariance,
     upsertPreferences, hasSubmittedPreferences,
-    getItinerary,
+    getItinerary, createItineraryDay, addItineraryItem, clearItinerary,
+    getItineraryDay, clearItineraryDay,
     eliminateOption, isEliminated, getEliminatedOptions,
-    updatePollOptions, deleteTrip
+    updatePollOptions, deleteTrip, reopenStage, getDb,
+    addConversationMessage, getConversationHistory, trimConversationHistory
 } from './database.js';
 
 if (process.env.NODE_ENV !== 'test') {
@@ -33,89 +37,243 @@ const openai = new OpenAI({
     baseURL: 'https://api.minimax.io/v1',
 });
 
+// --- BlueBubbles Private API (native polls, reactions, effects) ---
+let advancedSdk = null;
+
+async function initBlueBubbles() {
+    const serverUrl = process.env.BLUEBUBBLES_URL;
+    const password = process.env.BLUEBUBBLES_API_KEY;
+    if (!serverUrl || !password) {
+        console.log('BlueBubbles not configured — native polls disabled. Set BLUEBUBBLES_URL and BLUEBUBBLES_API_KEY in .env');
+        return;
+    }
+    try {
+        // Don't pass apiKey — that triggers SDK's { apiKey } socket auth which BB rejects.
+        // Instead, use no apiKey (legacy mode) and inject password via socket query params.
+        advancedSdk = new AdvancedIMessageKit({ serverUrl, logLevel: 'warn' });
+
+        // BlueBubbles authenticates via query param, not socket auth
+        advancedSdk.socket.io.opts.query = { password };
+
+        // Also patch HTTP client for REST calls (polls, messages, etc.)
+        advancedSdk.http.defaults.params = { password };
+
+        // Wait for the 'ready' event to confirm full connection
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Connection timed out'));
+            }, 10000);
+
+            advancedSdk.on('ready', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+
+            advancedSdk.connect().catch(reject);
+        });
+
+        console.log('BlueBubbles Private API connected — native polls enabled');
+        setupPollVoteListener();
+    } catch (err) {
+        console.error('BlueBubbles connection failed — falling back to text polls:', err.message);
+        advancedSdk = null;
+    }
+}
+
+function chatGuid(chatId) {
+    if (chatId.startsWith('iMessage;')) return chatId;
+    return `iMessage;+;${chatId}`;
+}
+
+function setupPollVoteListener() {
+    if (!advancedSdk) return;
+
+    advancedSdk.on('new-message', (msg) => {
+        try {
+            if (!isPollVote(msg)) return;
+
+            const voteData = parsePollVotes(msg);
+            if (!voteData?.votes?.length) return;
+
+            const rawChatGuid = msg.chats?.[0]?.guid || msg.chatGuid;
+            if (!rawChatGuid) return;
+
+            const chatId = rawChatGuid.replace(/^iMessage;\+;/, '');
+            const trip = getTripByChatId(chatId);
+            if (!trip) return;
+
+            const activePoll = getActivePollByChatId(chatId);
+            if (!activePoll) return;
+
+            for (const vote of voteData.votes) {
+                const handle = vote.participantHandle;
+                let participant = getParticipantBySenderId(handle, trip.id);
+                if (!participant) {
+                    const pId = createParticipant(trip.id, handle, handle);
+                    participant = { id: pId };
+                }
+
+                const pollDef = parsePollDefinition(msg);
+                if (!pollDef) continue;
+
+                const votedOption = pollDef.options.find(o => o.optionIdentifier === vote.voteOptionIdentifier);
+                if (!votedOption) continue;
+
+                const matchedOption = activePoll.options.find(o => o.text === votedOption.text);
+                if (!matchedOption) continue;
+
+                recordVote(activePoll.id, participant.id, matchedOption.emoji);
+                console.log(`Poll vote synced: ${handle} → "${matchedOption.text}"`);
+            }
+
+            // Check auto-close
+            const allVotes = getVotesForPoll(activePoll.id);
+            const totalMembers = getParticipantsByTripId(trip.id).length;
+
+            if (allVotes.length >= totalMembers && totalMembers > 0) {
+                const tally = {};
+                for (const v of allVotes) {
+                    tally[v.option_emoji] = (tally[v.option_emoji] || 0) + 1;
+                }
+                const maxCount = Math.max(...Object.values(tally));
+                const winners = Object.entries(tally).filter(([, c]) => c === maxCount);
+
+                if (winners.length === 1) {
+                    const winEmoji = winners[0][0];
+                    const winOption = activePoll.options.find(o => o.emoji === winEmoji);
+                    closePoll(activePoll.id, winOption.text);
+                    for (const opt of activePoll.options) {
+                        if (opt.emoji !== winEmoji) {
+                            eliminateOption(trip.id, trip.stage, opt.text);
+                        }
+                    }
+                    sendToGroupChat(chatId, `Poll closed! "${winOption.text}" wins!`);
+                } else {
+                    const tiedNames = winners.map(([emoji]) =>
+                        activePoll.options.find(o => o.emoji === emoji)?.text
+                    ).filter(Boolean);
+                    sendToGroupChat(chatId, `Poll tied between ${tiedNames.join(' and ')}. Organizer, break the tie.`);
+                }
+            }
+        } catch (err) {
+            console.error('Poll vote listener error:', err.message);
+        }
+    });
+}
+
 console.log('iMessage AI Agent started...');
 
-// --- Conversation History ---
-const conversationHistories = new Map();
+// --- Conversation History (persisted to SQLite) ---
 const MAX_HISTORY = 20;
 
 function getHistory(chatId) {
-    return conversationHistories.get(chatId) || [];
+    return getConversationHistory(chatId, MAX_HISTORY);
 }
 
-function addToHistory(chatId, message) {
-    if (!conversationHistories.has(chatId)) {
-        conversationHistories.set(chatId, []);
-    }
-    const history = conversationHistories.get(chatId);
-    history.push(message);
-    if (history.length > MAX_HISTORY) {
-        history.splice(0, history.length - MAX_HISTORY);
-    }
+function addToHistory(chatId, role, content) {
+    if (!content) return;
+    addConversationMessage(chatId, role, content);
+    trimConversationHistory(chatId, MAX_HISTORY);
 }
 
 // --- System Prompt ---
-const SYSTEM_PROMPT = `You are a trip planning assistant in an iMessage group chat.
+const SYSTEM_PROMPT = `You are a trip planning agent in an iMessage group chat. You see all messages (prefixed [SenderName]) but only respond when @mentioned. Keep messages short (1-2 sentences or bullet lists). Emojis only at line start. NEVER create a poll if one is already open.
 
-CRITICAL RULES:
-- Keep responses to 1-2 short sentences. Bullet lists are fine. Emojis only at the start of a line.
-- Ask ONE question at a time. Wait for the answer before asking the next.
-- NEVER create a poll if one is already open. Wait for the current poll to close first.
-- NEVER dump multiple questions or options in one message.
+=== ROLES ===
+ORGANIZER: Set destination, dates, schedule, locked locations, free day count, transport details. Can override/skip any vote, re-add voted-out options, trigger next stage. First member to interact becomes organizer. Any member can issue /organizer @username to reassign (permanent once set via command).
+MEMBER: Vote on polls, submit scalar prefs via extension, propose new venue/activity/location ideas, declare transport availability.
+AGENT (you): Generate suggestions via web search, post batched questions, tally votes, aggregate prefs, auto-handle logistics (incl. carpooling math), assemble itinerary. NEVER reveal individual preference scores. Make subjective decisions ONLY if no vote exists or no members respond.
 
-FIRST INTERACTION: If no trip exists, greet briefly and ask: "Where are you going?" Wait for the answer. Then ask dates. One thing at a time.
+=== PIPELINE ===
+setup → preferences → activity_types → venues → day_assignment → logistics → review → booked
 
-Roles:
-- Organizer: first person to provide destination + dates. Sets levers, overrides votes, advances stages.
-- Member: votes, submits preferences, proposes options.
+--- SETUP (rules 1-8) ---
+1. On first interaction: greet, explain what you help with, ask organizer for destination and dates.
+2. Do NOT begin preference collection or suggestions until BOTH destination AND dates confirmed.
+3. Accept three optional organizer levers: free day count, location confidence (locked stops), rough schedule. Missing levers resolved later with collected data.
+4. Confirmed/locked locations → show immediately as locked stops, no vote needed.
+5. Organizer-provided options → run vote using ONLY those options.
+6. Open stops → run web search using aggregated prefs AFTER prefs collected. Never suggest from training data alone.
+7. Rough schedule → treat assigned day-stop pairs as confirmed. Run funnel only for unassigned slots.
+8. Short trips (1-2 days or local hangouts): skip destination stage. Run Activity Types and Venues. Skip Day Assignment. Weight budget+adventure higher than pace. No free days.
 
-Trip stages: setup → preferences → activity_types → venues → day_assignment → logistics → review → booked
+--- TRANSPORT (collected during setup, rules 36-45) ---
+9. After trip foundation confirmed, collect: total cars, seat capacity per car, rental needs, designated drivers, departure points if split.
+10. Calculate total seats vs group size. If seats < group, post shortfall warning + rental search links before proceeding.
+11. If rental needed: add rental logistics to Day 1 and final day itinerary. Include rental search links in booking output.
+12. If designated drivers declared: flag alcohol-centric venues (bars, wineries, breweries) when DD count < cars. Do not block voting.
+13. Do NOT assume anyone drinks. Only apply DD logic when explicitly declared.
+14. Split departures: calc drive time from each origin to first stop. Use longest time to set Day 1 earliest start. Post rendezvous note.
+15. Flights/trains: surface search links in booking output. Use arrival/departure times to constrain Day 1 start and final day end.
+16. Stage 4 (venues): check parking at each voted venue. Flag no-parking venues; suggest rideshare.
+17. Multiple cars: calculate carpooling assignment (seats vs members). Post suggested assignment. Organizer can override.
+18. Include per-leg transport notes in itinerary: mode, estimated time, parking/rideshare per stop.
+19. If transport data not provided: proceed without it. Note in itinerary that transport planning was skipped. Do not block funnel.
 
-SETUP STAGE:
-After trip creation, ask the organizer ONE lever at a time:
-1. "How many free days?" (wait for answer or "skip")
-2. "Any must-visit stops?" (wait for answer or "skip")
-3. "Want to pre-assign anything to specific days?" (wait for answer or "skip")
-After all levers are addressed (or skipped), use advanceStage.
+--- PREFERENCES (rules 9-17) ---
+20. Post preference extension bubble after setup complete, before any suggestions.
+21. Collect exactly 3 scalar scores via extension: pace (1-5), budget (1-5), adventure (1-5).
+22. Submissions are silent API payloads. Values NEVER posted as visible messages.
+23. Update bubble summary as responses arrive (e.g. "3 of 5 responded"). Never reveal individual values.
+24. Members can update scores before organizer triggers processing. Accept latest, discard prior.
+25. Non-respondents excluded from average. Their absence does not block progress.
+26. Compute average per dimension. Round to one decimal. Post aggregate only.
+27. If stddev > 1.5 on any dimension: post note to organizer "Group is split on [dimension]. Using average."
+28. Zero responses → use neutral defaults (3/3/3) and note it.
 
-PREFERENCES STAGE:
-Ask the group to share their preferences. Tell them they can either:
-1. Reply with 3 numbers (pace, budget, adventure, each 1-5) and you'll record it
-2. Open the TripPlanner app in the iMessage app drawer for an interactive slider experience
-When someone replies with numbers, call submitPreferences. NEVER repeat individual scores. When organizer says to continue, advanceStage and show aggregates only.
+--- PLANNING FUNNEL (rules 18-23) ---
+29. Stages in order: Activity Types → Venue Suggestions → Day Assignment → Logistics Fill → Itinerary Review. No skipping except short-trip rule.
+30. Batch ALL questions within a stage into a single message or bubble. Never post one question then wait then post another in same stage.
+31. ALL venue/activity suggestions must come from real-time web search (geminiResearch). Include: name, category, one-line description, direct URL.
+32. Options per stage by trip length: 1-2 days → 4-6; 3-5 days → 6-8; 6+ days → 8-10.
+33. Filter suggestions through aggregated prefs. Budget 1-2 → no luxury venues. Adventure 1-2 → no niche/experimental options.
 
-ACTIVITY TYPES STAGE:
-Create ONE poll with activity categories relevant to the destination and preferences. Wait for it to close before doing anything else.
+--- VOTING (rules 24-31) ---
+34. Every subjective decision (where to eat, what activity, which venue) MUST go to group vote.
+35. CRITICAL: When someone votes, you MUST call recordVote. The vote is only real if the tool is called.
+36. Logistical decisions (routing, travel time, hours, reservation timing) are auto-handled. Post as FYI, not polls.
+37. Majority rules. Tie → escalate: "[A] and [B] tied. Organizer, please decide."
+38. Vote closes when all members voted OR organizer manually advances.
+39. New option proposed during active vote → add immediately via addPollOption, post notification.
+40. Organizer override on live vote → close it, apply choice, post: "Organizer set [choice]. Vote closed."
+41. Voted-out options permanently removed. Never resurface unless organizer explicitly re-adds.
+42. Zero vote responses → agent selects best match to aggregated prefs, posts selection + reasoning, continues.
+43. Duplicate proposal of existing option → reject silently, do not add.
 
-VENUES STAGE:
-For ONE winning activity type at a time:
-1. Use geminiResearch (type "places") to find real venues at the destination
-2. Create ONE poll with the shortlist
-3. Wait for poll to close
-4. Move to the next activity type
-Repeat until all activity types have venues. Then advanceStage.
-Scale options by trip length: 1-2 days → 4-6, 3-5 days → 6-8, 6+ days → 8-10.
+--- FREE DAYS (rules 32-35) ---
+44. If organizer sets free day count, use it. Do not override.
+45. If not set, infer from pace: 1-2 → 30-40% free; 3 → 15-20%; 4-5 → 0-10%. Round to nearest whole day.
+46. Free days have NO mandatory activities.
+47. For each free day, generate 4-6 optional low-effort suggestions: "Free day — here are some ideas if you want them."
 
-RESEARCH: Use geminiResearch for all research needs:
-- type "places" — find restaurants, attractions, activities with URLs
-- type "safety" — check if an area is safe for tourists
-- type "hotels" — find hotels, Airbnbs, hostels with booking URLs
-- type "distances" — estimate travel times between stops
-- type "general" — any other travel research
-Always research safety when a new destination is set. Include URLs in suggestions when available.
+--- ITINERARY & OUTPUT (rules 46-52) ---
+48. Assemble itinerary ONLY after Logistics Fill complete.
+49. Format: one block per day. Each block: day label, confirmed stops with times, travel/transport notes between stops, parking/rideshare reminders, reservation notes.
+50. Distinguish confirmed vs voted stops: "[Confirmed]" vs "[Group choice]".
+51. If carpooling calculated, include in itinerary header per day.
+52. After group confirms: post direct booking links per venue (name, URL, deadline). Include rental/flight/train links.
+53. Itinerary editable until booking links sent. On change: update and post notification of what changed.
+54. If organizer reopens a prior stage: invalidate all downstream decisions and re-run from that point.
 
-VOTING RULES:
-- Every subjective decision goes to a vote — never pick for the group
-- Majority rules. Ties: ask organizer to break it
-- Polls auto-close when all members vote. You don't need to close them manually.
-- If a member proposes a new option, use addPollOption
-- Voted-out options are gone forever
-- If zero votes after organizer advances, pick based on preferences and explain why
-- Logistical decisions are FYI messages, not polls
+--- PRIVACY (rules 53-55) ---
+55. Individual preference scores NEVER posted in chat or exposed to any member.
+56. Organizer is NOT exempt — their scores also never revealed.
+57. All preference and transport data scoped to current session. Do not persist across chats/sessions.
 
-Guidelines:
-- Messages are prefixed with [SenderName] in group chats
-- Only the organizer can use setFreeDays, setLocationConfidence, setSchedule, advanceStage, closePollWithResult, organizerOverride, and deleteTrip`;
+--- ERROR HANDLING (rules 56-60) ---
+58. Web search fails → notify chat, ask members to suggest options manually.
+59. Only one option remaining after votes/filtering → auto-select it, notify group.
+60. Organizer unresponsive during tie/override → flag in chat, hold stage open until response.
+
+RESEARCH: Use geminiResearch for all research:
+- "places" → restaurants, attractions, activities with URLs
+- "safety" → area safety check (always run on new destination)
+- "hotels" → accommodation with booking URLs
+- "distances" → travel times between stops
+- "general" → any other travel research
+Include Apple/Google Maps links when presenting places or hotels.
+
+ORGANIZER-ONLY TOOLS: Only the organizer can use setFreeDays, setLocationConfidence, setSchedule, advanceStage, closePollWithResult, organizerOverride, deleteTrip, approveItinerary, and reopenStage`;
 
 // --- Tool Definitions ---
 const NUMBER_EMOJIS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
@@ -362,6 +520,128 @@ const tools = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'reopenStage',
+            description: 'Organizer only. Reopen a prior planning stage. Invalidates all downstream polls/decisions from that stage forward and re-runs the funnel from that point.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    target_stage: {
+                        type: 'string',
+                        enum: ['setup', 'preferences', 'activity_types', 'venues', 'day_assignment', 'logistics', 'review'],
+                        description: 'Which stage to reopen',
+                    },
+                },
+                required: ['target_stage'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'setTransport',
+            description: 'Organizer declares transport details: total cars, seat capacity per car, rental needs, designated drivers, and departure points. Collected during setup.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    cars: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                owner: { type: 'string', description: 'Name of car owner' },
+                                seats: { type: 'number', description: 'Seat capacity including driver' },
+                            },
+                            required: ['owner', 'seats'],
+                        },
+                        description: 'List of available cars with owner and seat count',
+                    },
+                    needs_rental: { type: 'boolean', description: 'Whether any member needs a rental car' },
+                    designated_drivers: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Names of designated drivers',
+                    },
+                    departure_points: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                member: { type: 'string' },
+                                location: { type: 'string' },
+                            },
+                        },
+                        description: 'If members depart from different locations',
+                    },
+                },
+                required: ['cars'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'reassignOrganizer',
+            description: 'Reassign the organizer role to a different member. Any member can call this with /organizer @username. Permanent once set.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    new_organizer_name: { type: 'string', description: 'Name or handle of the new organizer' },
+                },
+                required: ['new_organizer_name'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'generateItinerary',
+            description: 'Generate a full day-by-day itinerary from confirmed stops, poll winners, and group preferences. Use during the day_assignment stage. Presents a soft plan that can be edited day by day.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'editItineraryDay',
+            description: 'Edit a specific day in the itinerary. Use when a member wants to swap, add, remove, or reorder items on a particular day.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    day_number: { type: 'number', description: 'Which day to edit (1-based)' },
+                    instruction: { type: 'string', description: 'What to change (e.g. "swap lunch for something cheaper", "add a coffee shop in the morning")' },
+                },
+                required: ['day_number', 'instruction'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'getFullItinerary',
+            description: 'Get the current full itinerary with all days and items. Use to show the group the current plan.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'approveItinerary',
+            description: 'Organizer only. Lock in the itinerary and advance to the logistics stage. Use when the group is happy with the plan.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+        },
+    },
 ];
 
 // --- Tool Execution ---
@@ -371,7 +651,7 @@ async function executeTool(toolCall, context) {
     const { chatId, sender, senderName } = context;
 
     // Organizer-only tools
-    const organizerTools = ['setFreeDays', 'setLocationConfidence', 'setSchedule', 'advanceStage', 'closePollWithResult', 'organizerOverride', 'deleteTrip'];
+    const organizerTools = ['setFreeDays', 'setLocationConfidence', 'setSchedule', 'advanceStage', 'closePollWithResult', 'organizerOverride', 'deleteTrip', 'approveItinerary', 'reopenStage', 'setTransport'];
     if (organizerTools.includes(name)) {
         const trip = getTripByChatId(chatId);
         if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
@@ -550,11 +830,12 @@ async function executeTool(toolCall, context) {
             const total = getParticipantsByTripId(trip.id).length;
             const prefs = getAggregatedPreferences(trip.id);
 
+            // PRIVACY: Only return aggregate info — never individual scores or who submitted what
             return JSON.stringify({
                 success: true,
                 action: isUpdate ? 'updated' : 'recorded',
-                voter: senderName || sender,
                 responses_so_far: `${prefs.response_count} of ${total}`,
+                note: 'Preferences recorded. Do NOT reveal individual scores — only say how many have responded.',
             });
         }
 
@@ -576,7 +857,35 @@ async function executeTool(toolCall, context) {
                 emoji: NUMBER_EMOJIS[i],
                 text: opt,
             }));
-            const pollId = createPoll(trip.id, `poll_${Date.now()}`, args.question, options, trip.stage);
+
+            // Try native iMessage poll via Private API
+            let nativePollGuid = null;
+            if (advancedSdk && !chatId.startsWith('dm_')) {
+                try {
+                    const nativePoll = await advancedSdk.polls.create({
+                        chatGuid: chatGuid(chatId),
+                        title: args.question,
+                        options: args.options.slice(0, 6),
+                    });
+                    nativePollGuid = nativePoll.guid;
+                    console.log(`Native iMessage poll created: ${nativePollGuid}`);
+                } catch (err) {
+                    console.error('Native poll creation failed, falling back to text:', err.message);
+                }
+            }
+
+            const messageId = nativePollGuid || `poll_${Date.now()}`;
+            const pollId = createPoll(trip.id, messageId, args.question, options, trip.stage);
+
+            if (nativePollGuid) {
+                return JSON.stringify({
+                    success: true, pollId,
+                    native: true,
+                    note: 'Native iMessage poll sent! Members can vote directly in the poll ballot.',
+                });
+            }
+
+            // Fallback: text-based poll
             const formatted = options.map(o => `${o.emoji} ${o.text}`).join('\n');
             const voteUrl = process.env.PUBLIC_URL
                 ? `${process.env.PUBLIC_URL}/vote/${pollId}`
@@ -707,6 +1016,19 @@ async function executeTool(toolCall, context) {
             activePoll.options.push({ emoji: newEmoji, text: args.option_text });
             updatePollOptions(activePoll.id, activePoll.options);
 
+            // Sync to native poll if available
+            if (advancedSdk && activePoll.message_id && !activePoll.message_id.startsWith('poll_')) {
+                try {
+                    await advancedSdk.polls.addOption({
+                        chatGuid: chatGuid(chatId),
+                        pollMessageGuid: activePoll.message_id,
+                        optionText: args.option_text,
+                    });
+                } catch (err) {
+                    console.error('Failed to add native poll option:', err.message);
+                }
+            }
+
             return JSON.stringify({
                 success: true,
                 added_by: senderName || sender,
@@ -755,6 +1077,234 @@ async function executeTool(toolCall, context) {
                 success: true,
                 deleted: tripName,
                 note: 'Trip and all associated data deleted. You can create a new trip.',
+            });
+        }
+
+        case 'reopenStage': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const result = reopenStage(trip.id, args.target_stage);
+            if (!result) return JSON.stringify({ error: `Invalid stage: ${args.target_stage}` });
+
+            return JSON.stringify({
+                success: true,
+                reopened_to: result,
+                note: `Reopened to ${result}. All downstream decisions have been invalidated. Re-running the funnel from this point.`,
+            });
+        }
+
+        case 'setTransport': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const totalSeats = (args.cars || []).reduce((sum, c) => sum + (c.seats || 0), 0);
+            const groupSize = getParticipantsByTripId(trip.id).length;
+            const shortfall = groupSize > totalSeats;
+
+            // Store transport data as JSON in trip rough_schedule (extend later with dedicated table)
+            const transportData = {
+                cars: args.cars || [],
+                needs_rental: args.needs_rental || false,
+                designated_drivers: args.designated_drivers || [],
+                departure_points: args.departure_points || [],
+                total_seats: totalSeats,
+            };
+
+            // Store in rough_schedule alongside existing data
+            let schedule = trip.rough_schedule ? JSON.parse(trip.rough_schedule) : {};
+            if (typeof schedule !== 'object' || Array.isArray(schedule)) schedule = { days: schedule };
+            schedule.transport = transportData;
+            setRoughSchedule(trip.id, schedule);
+
+            const result = {
+                success: true,
+                total_seats: totalSeats,
+                group_size: groupSize,
+                cars: args.cars,
+            };
+
+            if (shortfall) {
+                result.shortfall = true;
+                result.seats_needed = groupSize - totalSeats;
+                result.note = `Shortfall: ${groupSize} members but only ${totalSeats} seats. Search for rental car options before proceeding.`;
+            }
+
+            if (args.designated_drivers?.length > 0) {
+                result.designated_drivers = args.designated_drivers;
+                const ddCount = args.designated_drivers.length;
+                const carCount = (args.cars || []).length;
+                if (ddCount < carCount) {
+                    result.dd_warning = `${ddCount} DD(s) for ${carCount} car(s). Flag alcohol-centric venues.`;
+                }
+            }
+
+            if (args.departure_points?.length > 1) {
+                result.split_departures = true;
+                result.note_departures = 'Calculate drive time from each origin to first stop. Use longest as Day 1 start.';
+            }
+
+            return JSON.stringify(result);
+        }
+
+        case 'reassignOrganizer': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const participants = getParticipantsByTripId(trip.id);
+            const target = participants.find(p =>
+                p.name?.toLowerCase() === args.new_organizer_name?.toLowerCase() ||
+                p.sender_id === args.new_organizer_name
+            );
+            if (!target) {
+                return JSON.stringify({ error: `Member "${args.new_organizer_name}" not found in this trip.` });
+            }
+
+            // Update roles
+            const db = getDb();
+            db.prepare('UPDATE participants SET role = ? WHERE trip_id = ? AND role = ?').run('member', trip.id, 'organizer');
+            db.prepare('UPDATE participants SET role = ? WHERE id = ?').run('organizer', target.id);
+            db.prepare('UPDATE trips SET organizer_sender_id = ? WHERE id = ?').run(target.sender_id, trip.id);
+
+            return JSON.stringify({
+                success: true,
+                new_organizer: target.name || target.sender_id,
+                note: `${target.name} is now the organizer. This is permanent.`,
+            });
+        }
+
+        case 'generateItinerary': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const stops = getStopsByTripId(trip.id);
+            const prefs = getAggregatedPreferences(trip.id);
+            const polls = getPollsByTripId(trip.id);
+
+            // Collect confirmed stops + poll winners
+            const confirmedStops = stops
+                .filter(s => s.confidence === 'confirmed' || s.type === 'confirmed')
+                .map(s => ({ name: s.name, day: s.day_number }));
+
+            const pollWinners = polls
+                .filter(p => p.status === 'closed' && p.winning_option)
+                .map(p => ({ name: p.winning_option, from_poll: p.question }));
+
+            const allStops = [...confirmedStops, ...pollWinners];
+
+            const tripData = {
+                destination: trip.destination,
+                startDate: trip.start_date,
+                endDate: trip.end_date,
+                stops: allStops,
+                preferences: prefs.response_count > 0 ? prefs : { avg_pace: 3, avg_budget: 3, avg_adventure: 3 },
+                freeDayCount: trip.free_day_count,
+                roughSchedule: trip.rough_schedule ? JSON.parse(trip.rough_schedule) : null,
+            };
+
+            const plan = await generateItineraryPlan(tripData);
+            if (plan.error) return JSON.stringify(plan);
+
+            // Save to DB (clear first for idempotency)
+            clearItinerary(trip.id);
+            for (const day of plan) {
+                const dayId = createItineraryDay(
+                    trip.id, day.day_number, day.date || null, day.is_free_day || false
+                );
+                for (let i = 0; i < (day.items || []).length; i++) {
+                    const item = day.items[i];
+                    addItineraryItem(
+                        dayId, item.venue_name, item.time || null,
+                        item.type || 'suggested', item.booking_url || null,
+                        item.notes || null, i
+                    );
+                }
+            }
+
+            // Format for display
+            const formatted = plan.map(day => {
+                const dayLabel = day.is_free_day ? `Day ${day.day_number} (Free Day)` : `Day ${day.day_number}`;
+                const dateStr = day.date ? ` — ${day.date}` : '';
+                const items = (day.items || []).map(it =>
+                    `  ${it.time || '—'} ${it.venue_name}${it.notes ? ` (${it.notes})` : ''}`
+                ).join('\n');
+                return `${dayLabel}${dateStr}\n${items}`;
+            }).join('\n\n');
+
+            return JSON.stringify({
+                success: true,
+                total_days: plan.length,
+                formatted: `Here's the proposed itinerary:\n\n${formatted}\n\nThis is a soft plan — tell me to edit any day (e.g. "edit day 2: swap lunch for something cheaper"). When everyone's happy, the organizer can approve it.`,
+            });
+        }
+
+        case 'editItineraryDay': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const dayData = getItineraryDay(trip.id, args.day_number);
+            if (!dayData) return JSON.stringify({ error: `Day ${args.day_number} doesn't exist in the itinerary yet.` });
+
+            const updatedItems = await editItineraryDayPlan(dayData.items, args.instruction, trip.destination);
+            if (updatedItems.error) return JSON.stringify(updatedItems);
+
+            // Replace items in DB
+            clearItineraryDay(dayData.id);
+            for (let i = 0; i < updatedItems.length; i++) {
+                const item = updatedItems[i];
+                addItineraryItem(
+                    dayData.id, item.venue_name, item.time || null,
+                    item.type || 'suggested', item.booking_url || null,
+                    item.notes || null, i
+                );
+            }
+
+            const formatted = updatedItems.map(it =>
+                `  ${it.time || '—'} ${it.venue_name}${it.notes ? ` (${it.notes})` : ''}`
+            ).join('\n');
+
+            return JSON.stringify({
+                success: true,
+                day_number: args.day_number,
+                formatted: `Day ${args.day_number} updated:\n${formatted}`,
+            });
+        }
+
+        case 'getFullItinerary': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+
+            const itinerary = getItinerary(trip.id);
+            if (!itinerary.length) return JSON.stringify({ error: 'No itinerary generated yet. Use generateItinerary first.' });
+
+            const formatted = itinerary.map(day => {
+                const dayLabel = day.is_free_day ? `Day ${day.day_number} (Free Day)` : `Day ${day.day_number}`;
+                const dateStr = day.date ? ` — ${day.date}` : '';
+                const items = day.items.map(it =>
+                    `  ${it.time || '—'} ${it.venue_name}${it.notes ? ` (${it.notes})` : ''}`
+                ).join('\n');
+                return `${dayLabel}${dateStr}\n${items}`;
+            }).join('\n\n');
+
+            return JSON.stringify({ success: true, itinerary, formatted });
+        }
+
+        case 'approveItinerary': {
+            const trip = getTripByChatId(chatId);
+            if (!trip) return JSON.stringify({ error: 'No trip exists for this chat.' });
+            if (!isOrganizer(trip.id, sender)) {
+                return JSON.stringify({ error: 'Only the organizer can approve the itinerary.' });
+            }
+
+            const itinerary = getItinerary(trip.id);
+            if (!itinerary.length) return JSON.stringify({ error: 'No itinerary to approve. Generate one first.' });
+
+            const nextStage = advanceStage(trip.id);
+            return JSON.stringify({
+                success: true,
+                previous_stage: 'day_assignment',
+                current_stage: nextStage,
+                note: 'Itinerary locked in! Moving to logistics — I\'ll research booking links, transport, and accommodation.',
             });
         }
 
@@ -808,6 +1358,7 @@ const MAX_TOOL_ROUNDS = 5;
 export async function callMinimaxAPI(messageText, context = {}) {
     const chatId = context.chatId || `dm_${context.sender || 'unknown'}`;
     const senderName = context.senderName || context.sender || 'User';
+    const addressed = context.addressed !== false; // default true (DMs are always addressed)
 
     // Normalize context so executeTool always has a valid chatId
     context = { ...context, chatId };
@@ -815,7 +1366,24 @@ export async function callMinimaxAPI(messageText, context = {}) {
     const userContent = context.chatId && !context.chatId.startsWith('dm_')
         ? `[${senderName}]: ${messageText}`
         : messageText;
-    addToHistory(chatId, { role: 'user', content: userContent });
+    addToHistory(chatId, 'user', userContent);
+
+    // Auto-register sender as participant if a trip exists for this chat
+    if (context.sender && !chatId.startsWith('dm_')) {
+        const trip = getTripByChatId(chatId);
+        if (trip) {
+            const existing = getParticipantBySenderId(context.sender, trip.id);
+            if (!existing) {
+                createParticipant(trip.id, context.sender, senderName);
+                console.log(`Auto-registered ${senderName} as participant`);
+            }
+        }
+    }
+
+    // If not directly @'d, just store the message for context — don't call the LLM
+    if (!addressed) {
+        return null;
+    }
 
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -866,7 +1434,7 @@ export async function callMinimaxAPI(messageText, context = {}) {
         let finalContent = responseMessage.content || '';
         finalContent = finalContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
 
-        addToHistory(chatId, { role: 'assistant', content: finalContent });
+        addToHistory(chatId, 'assistant', finalContent);
         return finalContent;
 
     } catch (error) {
@@ -875,16 +1443,23 @@ export async function callMinimaxAPI(messageText, context = {}) {
     }
 }
 
-sdk.startWatching({
-    onDirectMessage,
-    onGroupMessage,
-    onError: (error) => {
-        console.error('iMessage SDK Error:', error);
-    },
-});
+// --- Startup ---
+async function start() {
+    await initBlueBubbles();
 
-// --- API Server for iMessage extension ---
-startApiServer();
+    sdk.startWatching({
+        onDirectMessage,
+        onGroupMessage,
+        onError: (error) => {
+            console.error('iMessage SDK Error:', error);
+        },
+    });
+
+    // --- API Server for iMessage extension ---
+    startApiServer();
+}
+
+start();
 
 // --- Extension watcher: receives poll results from the iMessage extension ---
 startExtensionWatcher((pollResult) => {
@@ -941,8 +1516,12 @@ startExtensionWatcher((pollResult) => {
 process.on('SIGINT', async () => {
     console.log('Shutting down iMessage AI Agent...');
     stopExtensionWatcher();
+    if (advancedSdk) {
+        try { await advancedSdk.close(); } catch {}
+    }
     await sdk.close();
     process.exit();
 });
 
+export { advancedSdk };
 export default sdk;
