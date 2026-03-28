@@ -2,7 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 import {
-    getTripByChatId, getTripById,
+    createTrip, getTripByChatId, getTripById,
     createParticipant, getParticipantBySenderId, getParticipantsByTripId,
     createPoll, getActivePollByChatId, closePoll,
     recordVote, getVotesForPoll,
