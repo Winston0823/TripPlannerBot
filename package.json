@@ -1,6 +1,33 @@
 {
+  "name": "trip-planner-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "imessageAgent.js",
+  "type": "module",
+  "scripts": {
+    "test": "jest"
+  },
+  "jest": {
+    "transform": {
+      "^.+\\.js$": "babel-jest"
+    },
+    "moduleDirectories": [
+      "node_modules"
+    ]
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
     "@photon-ai/imessage-kit": "^2.1.2",
-    "better-sqlite3": "^12.8.0"
+    "axios": "^1.14.0",
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "@babel/preset-env": "^7.29.2",
+    "babel-jest": "^30.3.0",
+    "jest": "^30.3.0"
   }
 }
