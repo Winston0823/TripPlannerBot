@@ -45,9 +45,10 @@ class MessagesViewController: MSMessagesAppViewController {
             }
         }
 
-        // Compact: single button to open dashboard
+        // Compact: show trip preview
         if style == .compact {
-            show(CompactView { [weak self] in
+            let vm = CompactViewModel(participantID: participantID)
+            show(CompactView(viewModel: vm) { [weak self] in
                 self?.requestPresentationStyle(.expanded)
             })
             return
