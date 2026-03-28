@@ -8,8 +8,11 @@
 import UIKit
 import SwiftUI
 import Messages
+import CryptoKit
 
 class MessagesViewController: MSMessagesAppViewController {
+
+    private var pendingAction: ExpandedAction?
 
     // MARK: - Lifecycle
 
@@ -19,54 +22,207 @@ class MessagesViewController: MSMessagesAppViewController {
     }
 
     override func willTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
+        // Do nothing here — wait until transition completes
+    }
+
+    override func didTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
         guard let conversation = activeConversation else { return }
         presentViewController(for: presentationStyle, with: conversation)
     }
 
     override func didReceive(_ message: MSMessage, conversation: MSConversation) {
-        // Re-present UI when a message arrives from the other party
         presentViewController(for: presentationStyle, with: conversation)
     }
 
     // MARK: - View Routing
 
-    private func presentViewController(for presentationStyle: MSMessagesAppPresentationStyle, with conversation: MSConversation) {
+    private func presentViewController(
+        for presentationStyle: MSMessagesAppPresentationStyle,
+        with conversation: MSConversation
+    ) {
         removeAllChildViewControllers()
 
-        // Check if we're opening from a tapped poll message
+        let participantID = deriveParticipantID(from: conversation)
+
+        // Check if user tapped an existing interactive message
         if let selectedMessage = conversation.selectedMessage,
-           let url = selectedMessage.url,
-           let poll = PollData.from(url: url) {
-            // Show voting view
-            let view = PollVoteView(poll: poll) { [weak self] updatedPoll in
-                self?.sendPollMessage(updatedPoll, conversation: conversation, session: selectedMessage.session)
+           let url = selectedMessage.url {
+
+            // Try new bubble types first
+            if let bubble = BubbleURL.parse(from: url) {
+                presentBubbleView(bubble: bubble, participantID: participantID, conversation: conversation)
+                return
             }
-            embed(AnyView(view))
-            return
+
+            // Fall back to legacy poll
+            if let poll = PollData.from(url: url) {
+                let view = PollVoteView(poll: poll) { [weak self] updatedPoll in
+                    self?.sendPollMessage(updatedPoll, conversation: conversation, session: selectedMessage.session)
+                }
+                embed(AnyView(view))
+                return
+            }
         }
 
+        // No message selected — show creation UI
         switch presentationStyle {
         case .compact:
-            let view = CompactView {
-                self.requestPresentationStyle(.expanded)
+            let view = CompactView { [weak self] action in
+                self?.pendingAction = action
+                self?.requestPresentationStyle(.expanded)
             }
             embed(AnyView(view))
 
         case .expanded:
-            let view = PollCreatorView { [weak self] poll in
-                self?.sendPollMessage(poll, conversation: conversation, session: nil)
-            }
-            embed(AnyView(view))
+            presentExpandedView(
+                action: pendingAction ?? .preferences,
+                participantID: participantID,
+                conversation: conversation
+            )
+            pendingAction = nil
 
         default:
-            let view = CompactView {
-                self.requestPresentationStyle(.expanded)
+            let view = CompactView { [weak self] action in
+                self?.pendingAction = action
+                self?.requestPresentationStyle(.expanded)
             }
             embed(AnyView(view))
         }
     }
 
-    // MARK: - Send Interactive Message
+    // MARK: - Bubble View Routing
+
+    private func presentBubbleView(
+        bubble: BubbleURL,
+        participantID: String,
+        conversation: MSConversation
+    ) {
+        switch bubble.type {
+        case .preference:
+            let vm = PreferenceViewModel(
+                sessionID: bubble.sessionID,
+                participantID: participantID
+            )
+            let view = PreferenceCollectionView(viewModel: vm) { [weak self] in
+                self?.dismiss()
+            }
+            embed(AnyView(view))
+
+        case .vote:
+            guard let voteID = bubble.voteID else { return }
+            let vm = VenueVoteViewModel(
+                sessionID: bubble.sessionID,
+                voteID: voteID,
+                participantID: participantID
+            )
+            let view = VenueVoteView(viewModel: vm) { [weak self] in
+                self?.dismiss()
+            }
+            embed(AnyView(view))
+
+        case .poll:
+            break
+        }
+    }
+
+    // MARK: - Expanded View Creation
+
+    private func presentExpandedView(
+        action: ExpandedAction,
+        participantID: String,
+        conversation: MSConversation
+    ) {
+        switch action {
+        case .preferences:
+            let sessionID = UUID().uuidString
+            let vm = PreferenceViewModel(
+                sessionID: sessionID,
+                participantID: participantID
+            )
+            let view = PreferenceCollectionView(viewModel: vm) { [weak self] in
+                self?.sendPreferenceBubble(sessionID: sessionID, conversation: conversation)
+            }
+            embed(AnyView(view))
+
+        case .vote:
+            let sessionID = UUID().uuidString
+            let voteID = UUID().uuidString
+            let vm = VenueVoteViewModel(
+                sessionID: sessionID,
+                voteID: voteID,
+                participantID: participantID
+            )
+            let view = VenueVoteView(viewModel: vm) { [weak self] in
+                self?.dismiss()
+            }
+            embed(AnyView(view))
+
+        case .poll:
+            let view = PollCreatorView { [weak self] poll in
+                self?.sendPollMessage(poll, conversation: conversation, session: nil)
+            }
+            embed(AnyView(view))
+        }
+    }
+
+    // MARK: - Send Preference Bubble
+
+    private func sendPreferenceBubble(sessionID: String, conversation: MSConversation) {
+        let message = MSMessage(session: MSSession())
+
+        let layout = MSMessageTemplateLayout()
+        layout.caption = "Share Your Travel Preferences"
+        layout.subcaption = "Tap to fill in your preferences"
+        layout.image = createBubbleImage(
+            title: "Travel Preferences",
+            subtitle: "Pace · Budget · Adventure"
+        )
+
+        message.url = BubbleURL.build(type: .preference, sessionID: sessionID)
+        message.layout = layout
+        message.summaryText = "Travel Preferences Survey"
+
+        conversation.insert(message) { error in
+            if let error = error {
+                print("Failed to send preference bubble: \(error)")
+            }
+        }
+
+        dismiss()
+    }
+
+    // MARK: - Send Vote Bubble
+
+    private func sendVoteBubble(
+        sessionID: String,
+        voteID: String,
+        question: String,
+        conversation: MSConversation
+    ) {
+        let message = MSMessage(session: MSSession())
+
+        let layout = MSMessageTemplateLayout()
+        layout.caption = question
+        layout.subcaption = "Tap to vote!"
+        layout.image = createBubbleImage(
+            title: question,
+            subtitle: "Tap to see options and vote"
+        )
+
+        message.url = BubbleURL.build(type: .vote, sessionID: sessionID, voteID: voteID)
+        message.layout = layout
+        message.summaryText = question
+
+        conversation.insert(message) { error in
+            if let error = error {
+                print("Failed to send vote bubble: \(error)")
+            }
+        }
+
+        dismiss()
+    }
+
+    // MARK: - Send Legacy Poll
 
     private func sendPollMessage(_ poll: PollData, conversation: MSConversation, session: MSSession?) {
         let message = MSMessage(session: session ?? MSSession())
@@ -87,53 +243,69 @@ class MessagesViewController: MSMessagesAppViewController {
         message.summaryText = "Poll: \(poll.question)"
 
         conversation.insert(message) { error in
-            if let error = error {
-                print("Failed to send message: \(error)")
-            }
+            if let error = error { print("Failed to send message: \(error)") }
         }
 
         dismiss()
     }
 
-    // MARK: - Poll Image Generator
+    // MARK: - Image Generators
+
+    private func createBubbleImage(title: String, subtitle: String) -> UIImage {
+        let size = CGSize(width: 300, height: 140)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            Theme.brandUIColor.withAlphaComponent(0.08).setFill()
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 12).fill()
+
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 17),
+                .foregroundColor: UIColor.label
+            ]
+            NSAttributedString(string: title, attributes: titleAttrs)
+                .draw(in: CGRect(x: 20, y: 30, width: 260, height: 44))
+
+            let subAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 14),
+                .foregroundColor: UIColor.secondaryLabel
+            ]
+            NSAttributedString(string: subtitle, attributes: subAttrs)
+                .draw(at: CGPoint(x: 20, y: 90))
+        }
+    }
 
     private func createPollImage(_ poll: PollData) -> UIImage {
         let size = CGSize(width: 300, height: 200)
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { ctx in
-            // Background
             UIColor.systemBlue.withAlphaComponent(0.1).setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
 
-            // Poll icon
-            let iconAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 40)
-            ]
-            let icon = NSAttributedString(string: "\u{1F4CA}", attributes: iconAttrs)
-            icon.draw(at: CGPoint(x: 20, y: 15))
-
-            // Question
             let titleAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.boldSystemFont(ofSize: 18),
                 .foregroundColor: UIColor.label
             ]
-            let title = NSAttributedString(string: poll.question, attributes: titleAttrs)
-            title.draw(in: CGRect(x: 20, y: 70, width: 260, height: 50))
+            NSAttributedString(string: poll.question, attributes: titleAttrs)
+                .draw(in: CGRect(x: 20, y: 20, width: 260, height: 50))
 
-            // Options preview
             let optAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 14),
                 .foregroundColor: UIColor.secondaryLabel
             ]
             let emojis = ["1\u{FE0F}\u{20E3}", "2\u{FE0F}\u{20E3}", "3\u{FE0F}\u{20E3}", "4\u{FE0F}\u{20E3}", "5\u{FE0F}\u{20E3}", "6\u{FE0F}\u{20E3}"]
             for (i, option) in poll.options.prefix(4).enumerated() {
-                let text = NSAttributedString(string: "\(emojis[i]) \(option.text)", attributes: optAttrs)
-                text.draw(at: CGPoint(x: 20, y: 125 + CGFloat(i) * 20))
+                NSAttributedString(string: "\(emojis[i]) \(option.text)", attributes: optAttrs)
+                    .draw(at: CGPoint(x: 20, y: 80 + CGFloat(i) * 24))
             }
         }
     }
 
     // MARK: - Helpers
+
+    private func deriveParticipantID(from conversation: MSConversation) -> String {
+        let uuid = conversation.localParticipantIdentifier
+        return ParticipantID.derive(from: uuid)
+    }
 
     private func embed(_ view: AnyView) {
         let hostingController = UIHostingController(rootView: view)
