@@ -440,6 +440,320 @@ app.get('/session/:sessionId/active', (req, res) => {
     });
 });
 
+// --- Vote Web Page ---
+
+const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : `http://localhost:${PORT}`;
+
+// Serve vote page (HTML)
+app.get('/vote/:pollId', (req, res) => {
+    const { pollId } = req.params;
+    const participantId = req.query.p || 'web-user';
+
+    // Find poll by ID
+    const poll = getDb().prepare('SELECT p.*, t.name as trip_name, t.destination FROM polls p JOIN trips t ON p.trip_id = t.id WHERE p.id = ?').get(pollId);
+    if (!poll) return res.status(404).send('Poll not found');
+
+    const options = JSON.parse(poll.options);
+    const allVotes = getVotesForPoll(poll.id);
+    const totalVotes = allVotes.length;
+
+    const voteCounts = {};
+    for (const opt of options) {
+        const optId = opt.emoji || opt.text;
+        voteCounts[optId] = 0;
+    }
+    for (const v of allVotes) {
+        voteCounts[v.option_emoji] = (voteCounts[v.option_emoji] || 0) + 1;
+    }
+
+    const isClosed = poll.status !== 'open';
+    const optionsHtml = options.map((opt, i) => {
+        const optId = opt.emoji || `opt_${i}`;
+        const count = voteCounts[optId] || 0;
+        const pct = totalVotes > 0 ? Math.round(count / totalVotes * 100) : 0;
+        const barColor = isClosed ? '#ccc' : '#5E5CE6';
+        return `
+            <button class="option ${isClosed ? 'closed' : ''}"
+                    onclick="${isClosed ? '' : `vote('${pollId}', '${optId}', '${participantId}')`}"
+                    ${isClosed ? 'disabled' : ''}>
+                <div class="option-header">
+                    <span class="option-emoji">${opt.emoji || ''}</span>
+                    <span class="option-text">${opt.text}</span>
+                    <span class="vote-count">${count}</span>
+                </div>
+                ${opt.category ? `<div class="option-category">${opt.category}</div>` : ''}
+                ${opt.description ? `<div class="option-desc">${opt.description}</div>` : ''}
+                <div class="bar-bg"><div class="bar" style="width:${pct}%;background:${barColor}"></div></div>
+            </button>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>${poll.question}</title>
+    <meta property="og:title" content="🗳️ ${poll.question}">
+    <meta property="og:description" content="${options.length} options · ${totalVotes} vote${totalVotes !== 1 ? 's' : ''} · ${poll.trip_name} (${poll.destination})">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="${BASE_URL}/vote/${pollId}">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+            background: #f2f2f7; color: #1c1c1e;
+            padding: 16px; max-width: 500px; margin: 0 auto;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { background: #1c1c1e; color: #f2f2f7; }
+            .card { background: #2c2c2e; }
+            .option { background: #3a3a3c; border-color: #48484a; }
+            .option:active { background: #48484a; }
+            .option-desc, .option-category { color: #98989d; }
+            .bar-bg { background: #48484a; }
+            .status { color: #98989d; }
+        }
+        .header { text-align: center; padding: 20px 0; }
+        .trip-badge {
+            display: inline-block; background: #5E5CE6; color: white;
+            padding: 4px 12px; border-radius: 20px; font-size: 12px;
+            font-weight: 600; margin-bottom: 12px;
+        }
+        h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+        .status { font-size: 14px; color: #8e8e93; margin-bottom: 20px; }
+        .option {
+            display: block; width: 100%; text-align: left;
+            background: white; border: 2px solid #e5e5ea;
+            border-radius: 14px; padding: 14px 16px; margin-bottom: 10px;
+            cursor: pointer; transition: all 0.15s;
+            font-family: inherit; font-size: inherit; color: inherit;
+        }
+        .option:active:not(.closed) { border-color: #5E5CE6; transform: scale(0.98); }
+        .option.closed { cursor: default; opacity: 0.8; }
+        .option-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .option-emoji { font-size: 20px; }
+        .option-text { font-weight: 600; font-size: 16px; flex: 1; }
+        .vote-count { font-size: 18px; font-weight: 700; color: #5E5CE6; }
+        .option-category { font-size: 12px; color: #5E5CE6; font-weight: 500; margin-bottom: 2px; }
+        .option-desc { font-size: 13px; color: #8e8e93; margin-bottom: 8px; }
+        .bar-bg { height: 5px; background: #e5e5ea; border-radius: 3px; overflow: hidden; }
+        .bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
+        .closed-banner {
+            background: #ff9500; color: white; text-align: center;
+            padding: 10px; border-radius: 10px; font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .success {
+            text-align: center; padding: 40px 20px;
+            display: none;
+        }
+        .success .check { font-size: 60px; margin-bottom: 12px; }
+        .success h2 { font-size: 20px; margin-bottom: 8px; }
+        .success p { color: #8e8e93; }
+        #options-list { transition: opacity 0.2s; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="trip-badge">✈️ ${poll.trip_name}</div>
+        <h1>${poll.question}</h1>
+        <div class="status">${totalVotes} vote${totalVotes !== 1 ? 's' : ''} · ${options.length} options</div>
+    </div>
+
+    ${isClosed ? '<div class="closed-banner">🔒 Voting is closed</div>' : ''}
+
+    <div id="options-list">${optionsHtml}</div>
+
+    <div class="success" id="success">
+        <div class="check">✅</div>
+        <h2>Vote recorded!</h2>
+        <p>You can close this page.</p>
+    </div>
+
+    <script>
+    async function vote(pollId, optionId, participantId) {
+        try {
+            const res = await fetch('/vote-api/' + pollId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ participantID: participantId, optionID: optionId })
+            });
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('options-list').style.display = 'none';
+                document.getElementById('success').style.display = 'block';
+            } else {
+                alert(data.error || 'Vote failed');
+            }
+        } catch (e) {
+            alert('Network error. Try again.');
+        }
+    }
+    </script>
+</body>
+</html>`;
+
+    res.type('html').send(html);
+});
+
+// Vote API for web page
+app.post('/vote-api/:pollId', (req, res) => {
+    const { pollId } = req.params;
+    const { participantID, optionID } = req.body;
+
+    const poll = getDb().prepare('SELECT p.*, t.chat_id FROM polls p JOIN trips t ON p.trip_id = t.id WHERE p.id = ?').get(pollId);
+    if (!poll) return res.status(404).json({ error: 'Poll not found' });
+    if (poll.status !== 'open') return res.status(400).json({ error: 'Poll is closed' });
+
+    const options = JSON.parse(poll.options);
+    const option = options.find(o => (o.emoji || o.id || o.text) === optionID);
+    if (!option) return res.status(400).json({ error: 'Invalid option' });
+
+    const participant = ensureParticipant(poll.trip_id, participantID);
+    recordVote(poll.id, participant.id, optionID);
+
+    res.json({ success: true });
+});
+
+// Preference web page
+app.get('/preferences/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    const trip = getTripFromSession(sessionId);
+    if (!trip) return res.status(404).send('Trip not found');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Travel Preferences — ${trip.name}</title>
+    <meta property="og:title" content="📋 Share Your Travel Preferences">
+    <meta property="og:description" content="${trip.name} · ${trip.destination} · Rate your pace, budget & adventure style">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+            background: #f2f2f7; color: #1c1c1e;
+            padding: 16px; max-width: 500px; margin: 0 auto;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { background: #1c1c1e; color: #f2f2f7; }
+            .slider-card { background: #2c2c2e; }
+            .label-row span { color: #98989d; }
+        }
+        .header { text-align: center; padding: 20px 0; }
+        .trip-badge {
+            display: inline-block; background: #5E5CE6; color: white;
+            padding: 4px 12px; border-radius: 20px; font-size: 12px;
+            font-weight: 600; margin-bottom: 12px;
+        }
+        h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+        .subtitle { font-size: 14px; color: #8e8e93; margin-bottom: 24px; }
+        .slider-card {
+            background: white; border-radius: 14px; padding: 16px;
+            margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        }
+        .slider-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .slider-label { font-weight: 600; font-size: 16px; }
+        .slider-value {
+            font-size: 18px; font-weight: 700; color: #5E5CE6;
+            background: rgba(94,92,230,0.1); width: 32px; height: 32px;
+            border-radius: 8px; display: flex; align-items: center; justify-content: center;
+        }
+        input[type=range] { width: 100%; accent-color: #5E5CE6; height: 6px; margin: 8px 0; }
+        .label-row { display: flex; justify-content: space-between; }
+        .label-row span { font-size: 12px; color: #8e8e93; }
+        .submit-btn {
+            display: block; width: 100%; padding: 16px; border: none;
+            background: #5E5CE6; color: white; font-size: 17px; font-weight: 600;
+            border-radius: 14px; cursor: pointer; margin-top: 20px;
+            font-family: inherit;
+        }
+        .submit-btn:active { opacity: 0.8; }
+        .submit-btn:disabled { background: #ccc; cursor: default; }
+        .success { text-align: center; padding: 40px 20px; display: none; }
+        .success .check { font-size: 60px; margin-bottom: 12px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="trip-badge">✈️ ${trip.name}</div>
+        <h1>Travel Preferences</h1>
+        <div class="subtitle">Help us plan the perfect trip</div>
+    </div>
+
+    <div id="form">
+        <div class="slider-card">
+            <div class="slider-header">
+                <span class="slider-label">🚶 Trip Pace</span>
+                <span class="slider-value" id="pace-val">3</span>
+            </div>
+            <input type="range" id="pace" min="1" max="5" value="3" oninput="document.getElementById('pace-val').textContent=this.value">
+            <div class="label-row"><span>Relaxed</span><span>Packed</span></div>
+        </div>
+
+        <div class="slider-card">
+            <div class="slider-header">
+                <span class="slider-label">💰 Budget</span>
+                <span class="slider-value" id="budget-val">3</span>
+            </div>
+            <input type="range" id="budget" min="1" max="5" value="3" oninput="document.getElementById('budget-val').textContent=this.value">
+            <div class="label-row"><span>Budget-friendly</span><span>Luxury</span></div>
+        </div>
+
+        <div class="slider-card">
+            <div class="slider-header">
+                <span class="slider-label">🏔️ Adventure</span>
+                <span class="slider-value" id="adventure-val">3</span>
+            </div>
+            <input type="range" id="adventure" min="1" max="5" value="3" oninput="document.getElementById('adventure-val').textContent=this.value">
+            <div class="label-row"><span>Familiar</span><span>Adventurous</span></div>
+        </div>
+
+        <button class="submit-btn" onclick="submitPrefs()">Submit Preferences</button>
+    </div>
+
+    <div class="success" id="success">
+        <div class="check">✅</div>
+        <h2>Preferences saved!</h2>
+        <p>You can close this page.</p>
+    </div>
+
+    <script>
+    async function submitPrefs() {
+        const params = new URLSearchParams(window.location.search);
+        const participantID = params.get('p') || 'web-user-' + Math.random().toString(36).slice(2,8);
+        try {
+            const res = await fetch('/session/${sessionId}/preferences', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    participantID,
+                    pace: parseInt(document.getElementById('pace').value),
+                    budget: parseInt(document.getElementById('budget').value),
+                    adventure: parseInt(document.getElementById('adventure').value)
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('form').style.display = 'none';
+                document.getElementById('success').style.display = 'block';
+            } else {
+                alert(data.error || 'Failed to save');
+            }
+        } catch(e) {
+            alert('Network error. Try again.');
+        }
+    }
+    </script>
+</body>
+</html>`;
+
+    res.type('html').send(html);
+});
+
 // --- Health check ---
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

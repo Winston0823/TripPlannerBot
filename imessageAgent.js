@@ -578,9 +578,12 @@ async function executeTool(toolCall, context) {
             }));
             const pollId = createPoll(trip.id, `poll_${Date.now()}`, args.question, options, trip.stage);
             const formatted = options.map(o => `${o.emoji} ${o.text}`).join('\n');
+            const voteUrl = process.env.PUBLIC_URL
+                ? `${process.env.PUBLIC_URL}/vote/${pollId}`
+                : `https://glorious-nourishment-production.up.railway.app/vote/${pollId}`;
             return JSON.stringify({
                 success: true, pollId,
-                formatted: `📊 ${args.question}\n\n${formatted}\n\nVote by replying with the option number, or open the TripPlanner app in iMessage for the full interactive experience! 🗳️`,
+                formatted: `📊 ${args.question}\n\n${formatted}\n\nReply with the option number to vote, or tap the link for the full experience:\n${voteUrl}`,
             });
         }
 
