@@ -2,7 +2,7 @@ import { IMessageSDK } from '@photon-ai/imessage-kit';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 import { onDirectMessage, onGroupMessage, sendToGroupChat } from './messageHandlers.js';
-import { foursquareSearch } from './tools.js';
+import { geminiResearch, appleMapSearch } from './tools.js';
 import { startExtensionWatcher, stopExtensionWatcher } from './extensionWatcher.js';
 import {
     STAGES,
@@ -85,12 +85,20 @@ Create ONE poll with activity categories relevant to the destination and prefere
 
 VENUES STAGE:
 For ONE winning activity type at a time:
-1. Search Foursquare for real venues
+1. Use geminiResearch (type "places") to find real venues at the destination
 2. Create ONE poll with the shortlist
 3. Wait for poll to close
 4. Move to the next activity type
 Repeat until all activity types have venues. Then advanceStage.
 Scale options by trip length: 1-2 days → 4-6, 3-5 days → 6-8, 6+ days → 8-10.
+
+RESEARCH: Use geminiResearch for all research needs:
+- type "places" — find restaurants, attractions, activities with URLs
+- type "safety" — check if an area is safe for tourists
+- type "hotels" — find hotels, Airbnbs, hostels with booking URLs
+- type "distances" — estimate travel times between stops
+- type "general" — any other travel research
+Always research safety when a new destination is set. Include URLs in suggestions when available.
 
 VOTING RULES:
 - Every subjective decision goes to a vote — never pick for the group
@@ -112,13 +120,33 @@ const tools = [
     {
         type: 'function',
         function: {
-            name: 'foursquareSearch',
-            description: 'Search for restaurants, hotels, attractions, and points of interest using Foursquare.',
+            name: 'geminiResearch',
+            description: 'Research tool powered by Gemini AI. Use for finding places, checking safety, finding hotels/Airbnbs, estimating distances, or general travel research.',
             parameters: {
                 type: 'object',
                 properties: {
-                    query: { type: 'string', description: 'What to search for (e.g. "sushi", "hotels", "museums")' },
-                    near: { type: 'string', description: 'Location to search near (e.g. "Tokyo, Japan", "downtown LA")' },
+                    query: { type: 'string', description: 'What to research (e.g. "best ramen spots", "hotels under $150", "is it safe at night")' },
+                    location: { type: 'string', description: 'Location context (e.g. "Tokyo, Japan", "downtown Palm Springs")' },
+                    research_type: {
+                        type: 'string',
+                        enum: ['places', 'safety', 'hotels', 'distances', 'general'],
+                        description: 'Type of research: places (restaurants/attractions/activities), safety (area safety check), hotels (hotels/Airbnbs/hostels), distances (travel times between stops), general (anything else)',
+                    },
+                },
+                required: ['query', 'research_type'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'appleMapSearch',
+            description: 'Search for places using Apple Maps. Returns Apple Maps links for locations. Use when you need map links or structured location data.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'What to search for' },
+                    near: { type: 'string', description: 'Location to search near' },
                 },
                 required: ['query'],
             },
@@ -349,8 +377,11 @@ async function executeTool(toolCall, context) {
     }
 
     switch (name) {
-        case 'foursquareSearch':
-            return await foursquareSearch(args.query, args.near);
+        case 'geminiResearch':
+            return await geminiResearch(args.query, args.location, args.research_type);
+
+        case 'appleMapSearch':
+            return await appleMapSearch(args.query, args.near);
 
         case 'createTrip': {
             const existing = getTripByChatId(chatId);
@@ -365,6 +396,21 @@ async function executeTool(toolCall, context) {
                 sender
             );
             createParticipant(tripId, sender, senderName || sender, 'organizer');
+
+            // Auto-research safety for the destination
+            let safetyInfo = null;
+            try {
+                const safetyResult = await geminiResearch(
+                    `tourist safety in ${args.destination}`,
+                    args.destination,
+                    'safety'
+                );
+                const cleaned = safetyResult.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+                safetyInfo = JSON.parse(cleaned);
+            } catch {
+                // Safety check failed — non-blocking, continue
+            }
+
             return JSON.stringify({
                 success: true, tripId,
                 name: args.name, destination: args.destination,
@@ -372,7 +418,8 @@ async function executeTool(toolCall, context) {
                 end_date: args.end_date || null,
                 organizer: senderName || sender,
                 stage: 'setup',
-                message: 'Trip created. You are the organizer. You can now optionally set: free day count, location confidence per stop, or a rough schedule. Say "done with setup" when ready to move on.',
+                safety: safetyInfo,
+                message: 'Trip created. You are the organizer. Share the safety summary with the group, then ask about optional setup: free day count, must-visit stops, or rough schedule. Say "done with setup" when ready.',
             });
         }
 
