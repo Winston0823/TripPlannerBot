@@ -5,6 +5,7 @@
   "main": "imessageAgent.js",
   "type": "module",
   "scripts": {
+    "start": "node -e \"import('./apiServer.js').then(m => m.startApiServer())\"",
     "test": "jest"
   },
   "jest": {
