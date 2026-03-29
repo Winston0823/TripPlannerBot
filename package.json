@@ -20,8 +20,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@photon-ai/advanced-imessage-kit": "^1.14.3",
     "@photon-ai/imessage-kit": "^2.1.2",
     "axios": "^1.14.0",
+    "bbgun": "^1.0.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",

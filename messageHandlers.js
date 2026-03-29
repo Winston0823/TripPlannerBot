@@ -1,6 +1,9 @@
 import { callMinimaxAPI } from './imessageAgent.js';
 import sdk from './imessageAgent.js';
 import { execSync } from 'child_process';
+import { writeFileSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
     getTripByChatId, getParticipantsByTripId,
     getPollsByTripId, getVotesForPoll,
@@ -11,22 +14,32 @@ const BOT_TRIGGER = /@(?:bot|shyt)/i;
 const OVERVIEW_CMD = /@shyt\s+overview/i;
 
 // --- AppleScript group chat fix ---
-// The SDK uses `chat id "chatXXX"` but AppleScript needs `chat id "iMessage;+;chatXXX"`
 export function sendToGroupChat(chatId, text) {
-    const escapedText = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const applescriptId = `iMessage;+;${chatId}`;
-    const script = `tell application "Messages"
-    set targetChat to chat id "${applescriptId}"
-    send "${escapedText}" to targetChat
-end tell`;
+    console.log(`Sending to group ${chatId} (${text.length} chars): ${text.substring(0, 120)}...`);
 
+    // Write message to temp file to avoid AppleScript escaping issues
+    const tmpFile = join(tmpdir(), `imsg_${Date.now()}.txt`);
     try {
-        execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`);
+        writeFileSync(tmpFile, text, 'utf-8');
+        const script = `
+            set msgText to read POSIX file "${tmpFile}" as «class utf8»
+            tell application "Messages"
+                set targetChat to chat id "${applescriptId}"
+                send msgText to targetChat
+            end tell
+        `;
+        execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, { timeout: 10000 });
         console.log(`Sent to group ${chatId}`);
     } catch (error) {
         console.error(`Failed to send to group ${chatId}:`, error.message);
-        // Fallback: try SDK's default method
-        return sdk.send(chatId, text);
+        try {
+            sdk.send(chatId, text);
+        } catch (e2) {
+            console.error(`SDK fallback also failed:`, e2.message);
+        }
+    } finally {
+        try { unlinkSync(tmpFile); } catch {}
     }
 }
 
@@ -82,25 +95,34 @@ export const onDirectMessage = async (msg) => {
         sender: msg.sender,
         senderName: msg.senderName,
     });
-    await sdk.send(msg.sender, response);
+    if (response) await sdk.send(msg.sender, response);
 };
 
 export const onGroupMessage = async (msg) => {
     console.log(`Group message in ${msg.chatId} from ${msg.sender}: ${msg.text}`);
 
+    // Handle @shyt overview command
     if (OVERVIEW_CMD.test(msg.text)) {
         const overview = buildOverviewMessage(msg.chatId);
         sendToGroupChat(msg.chatId, overview);
         return;
     }
 
-    if (!BOT_TRIGGER.test(msg.text)) return;
-
+    const isDirectlyAddressed = BOT_TRIGGER.test(msg.text);
     const cleanedText = msg.text.replace(BOT_TRIGGER, '').trim();
+
+    // Feed ALL messages to the LLM for context, but flag whether it was @'d
     const response = await callMinimaxAPI(cleanedText, {
         chatId: msg.chatId,
         sender: msg.sender,
         senderName: msg.senderName,
+        addressed: isDirectlyAddressed,
     });
-    sendToGroupChat(msg.chatId, response);
+
+    // Only send a reply if the bot was @'d AND there's content to send
+    if (isDirectlyAddressed && response) {
+        sendToGroupChat(msg.chatId, response);
+    }
+    // If not addressed, the message is stored in conversation history
+    // but the bot stays silent
 };

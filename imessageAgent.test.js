@@ -83,6 +83,7 @@ describe('iMessage AI Agent', () => {
             await onGroupMessage(msg);
             expect(mockCallMinimaxAPI).toHaveBeenCalledWith('lets go to bali', {
                 chatId: 'group_123', sender: 'user_abc', senderName: 'Alice',
+                addressed: true,
             });
         });
 
@@ -95,16 +96,21 @@ describe('iMessage AI Agent', () => {
             await onGroupMessage(msg);
             expect(mockCallMinimaxAPI).toHaveBeenCalledWith('find restaurants', {
                 chatId: 'group_123', sender: 'user_abc', senderName: 'Alice',
+                addressed: true,
             });
         });
 
-        test('should ignore messages without trigger', async () => {
+        test('should store non-@ messages for context but not reply', async () => {
+            mockCallMinimaxAPI.mockResolvedValue(null);
             const msg = {
                 chatId: 'group_123', sender: 'user_abc',
                 senderName: 'Alice', text: 'hey everyone',
             };
             await onGroupMessage(msg);
-            expect(mockCallMinimaxAPI).not.toHaveBeenCalled();
+            expect(mockCallMinimaxAPI).toHaveBeenCalledWith('hey everyone', {
+                chatId: 'group_123', sender: 'user_abc', senderName: 'Alice',
+                addressed: false,
+            });
             expect(mockSdkSend).not.toHaveBeenCalled();
         });
 

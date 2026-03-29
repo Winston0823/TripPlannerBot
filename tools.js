@@ -51,6 +51,7 @@ Return a JSON array of 5-8 results. Each result must have:
 - price_level: "$", "$$", "$$$", or "$$$$"
 - url: the place's actual website URL (google it, be accurate)
 - estimated_address: best guess at the address
+- maps_link: an Apple Maps link in format "https://maps.apple.com/?q=PLACE+NAME&address=ADDRESS" (URL-encode the name and address). If the place is outside countries where Apple Maps has good coverage (e.g. China, some parts of Africa/Middle East), use a Google Maps link instead: "https://www.google.com/maps/search/?api=1&query=PLACE+NAME+ADDRESS"
 
 Return ONLY the JSON array, no markdown or explanation.`,
 
@@ -79,6 +80,7 @@ Return a JSON array of 5-6 options mixing hotels and vacation rentals. Each must
 - description: 1 sentence highlight
 - url: booking URL (Airbnb, Booking.com, or hotel's own site)
 - neighborhood: which area it's in
+- maps_link: Apple Maps link "https://maps.apple.com/?q=PROPERTY+NAME&address=ADDRESS" (URL-encoded). Use Google Maps link if Apple Maps lacks coverage for that region.
 
 Return ONLY the JSON array, no markdown.`,
 
@@ -125,6 +127,82 @@ Provide helpful, specific, and accurate travel information. Include real place n
     }
 
     return result;
+}
+
+// --- Itinerary Generation via Gemini ---
+
+export async function generateItineraryPlan(tripData) {
+    const { destination, startDate, endDate, stops, preferences, freeDayCount, roughSchedule } = tripData;
+
+    const prompt = `You are a travel itinerary planner. Create a detailed day-by-day itinerary.
+
+Trip details:
+- Destination: ${destination}
+- Dates: ${startDate || 'flexible'} to ${endDate || 'flexible'}
+- Confirmed stops/venues: ${JSON.stringify(stops)}
+- Group preferences: Pace ${preferences.avg_pace}/5, Budget ${preferences.avg_budget}/5, Adventure ${preferences.avg_adventure}/5
+- Free/unstructured days requested: ${freeDayCount || 0}
+${roughSchedule ? `- Pre-assigned schedule: ${JSON.stringify(roughSchedule)}` : ''}
+
+Rules:
+- Distribute confirmed stops logically across the days
+- Fill gaps with suggestions that match group preferences
+- Respect pre-assigned days if provided
+- Mark free days with is_free_day: true (include light optional suggestions)
+- Each item needs a realistic time slot
+- Consider travel time between locations
+- Morning items first, evening items last
+
+Return a JSON array of days:
+[{
+  "day_number": 1,
+  "date": "YYYY-MM-DD" or null,
+  "is_free_day": false,
+  "items": [{
+    "venue_name": "Place Name",
+    "time": "10:00 AM",
+    "type": "confirmed" or "suggested",
+    "notes": "Brief note"
+  }]
+}]
+
+Return ONLY the JSON array, no markdown or explanation.`;
+
+    const result = await callGemini(prompt);
+    try {
+        const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        return JSON.parse(cleaned);
+    } catch {
+        return { error: 'Failed to parse itinerary plan', raw: result };
+    }
+}
+
+export async function editItineraryDayPlan(currentItems, instruction, destination) {
+    const prompt = `You are a travel itinerary editor. Modify this single day's plan based on the user's request.
+
+Destination: ${destination}
+Current day plan:
+${JSON.stringify(currentItems, null, 2)}
+
+User's edit request: "${instruction}"
+
+Rewrite ONLY this day's items incorporating the edit. Keep items not affected by the edit. Return a JSON array of items:
+[{
+  "venue_name": "Place Name",
+  "time": "10:00 AM",
+  "type": "confirmed" or "suggested",
+  "notes": "Brief note"
+}]
+
+Return ONLY the JSON array, no markdown or explanation.`;
+
+    const result = await callGemini(prompt);
+    try {
+        const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        return JSON.parse(cleaned);
+    } catch {
+        return { error: 'Failed to parse edited day plan', raw: result };
+    }
 }
 
 // --- Apple Maps API (stub — ready for integration) ---

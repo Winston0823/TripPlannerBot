@@ -122,12 +122,35 @@ class APIService {
 
     // MARK: - Active Session (what to show when user opens Extension)
 
+    struct RoughSchedule: Codable {
+        let transport: TransportInfo?
+
+        struct TransportInfo: Codable {
+            let cars: Int?
+            let totalSeats: Int?
+            let designatedDrivers: Int?
+            let departurePoint: String?
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            transport = try? container.decode(TransportInfo.self, forKey: .transport)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case transport
+        }
+    }
+
     struct TripInfo: Codable {
         let name: String
         let destination: String
         let startDate: String?
         let endDate: String?
         let stage: String?
+        let freeDayCount: Int?
+        let organizer: String?
+        let roughSchedule: RoughSchedule?
     }
 
     struct PreferenceSummary: Codable {
@@ -230,7 +253,7 @@ class APIService {
         DashboardResponse(
             hasTrip: true,
             sessionId: "mock-session",
-            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "venues"),
+            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "venues", freeDayCount: 1, organizer: "Stefan", roughSchedule: nil),
             participants: [
                 ParticipantInfo(name: "Stefan", role: "organizer"),
                 ParticipantInfo(name: "Alice", role: "member"),
@@ -264,7 +287,7 @@ class APIService {
         ActiveSession(
             hasTrip: true,
             sessionId: "mock-session",
-            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "preferences"),
+            trip: TripInfo(name: "Tokyo Trip", destination: "Tokyo, Japan", startDate: "2026-04-15", endDate: "2026-04-22", stage: "preferences", freeDayCount: 1, organizer: "Stefan", roughSchedule: nil),
             activePoll: mockVoteResponse(),
             needsPreferences: true,
             preferenceStatus: PreferenceSummary(responseCount: 2, totalCount: 5)

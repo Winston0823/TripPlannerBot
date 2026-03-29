@@ -11,7 +11,8 @@ import {
     getPollsByTripId,
     getItinerary,
     getStopsByTripId,
-    getDb
+    getDb,
+    addConversationMessage, getConversationHistory, trimConversationHistory
 } from './database.js';
 
 dotenv.config();
@@ -241,8 +242,7 @@ function getOpenAI() {
     return openai;
 }
 
-const chatHistories = new Map();
-const MAX_HISTORY = 20;
+const MAX_CHAT_HISTORY = 20;
 
 const CHAT_SYSTEM_PROMPT = `You are a trip planning assistant in an iMessage group chat. Help groups plan trips together.
 
@@ -258,16 +258,11 @@ app.post('/chat', async (req, res) => {
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     const sessionKey = chatId || 'default';
-    if (!chatHistories.has(sessionKey)) {
-        chatHistories.set(sessionKey, []);
-    }
-    const history = chatHistories.get(sessionKey);
-
     const userContent = senderName ? `[${senderName}]: ${message}` : message;
-    history.push({ role: 'user', content: userContent });
-    if (history.length > MAX_HISTORY) {
-        history.splice(0, history.length - MAX_HISTORY);
-    }
+    addConversationMessage(sessionKey, 'user', userContent);
+    trimConversationHistory(sessionKey, MAX_CHAT_HISTORY);
+
+    const history = getConversationHistory(sessionKey, MAX_CHAT_HISTORY);
 
     try {
         const response = await getOpenAI().chat.completions.create({
@@ -279,7 +274,7 @@ app.post('/chat', async (req, res) => {
         });
 
         const reply = response.choices[0].message.content;
-        history.push({ role: 'assistant', content: reply });
+        addConversationMessage(sessionKey, 'assistant', reply);
 
         res.json({ reply });
     } catch (error) {
@@ -292,17 +287,38 @@ app.post('/chat', async (req, res) => {
 app.get('/participant/:participantId/dashboard', (req, res) => {
     const { participantId } = req.params;
 
-    const participant = getDb().prepare(
+    let participant = getDb().prepare(
         'SELECT * FROM participants WHERE sender_id = ? ORDER BY created_at DESC LIMIT 1'
     ).get(participantId);
 
-    if (!participant) {
-        return res.json({ hasTrip: false });
+    let trip;
+    if (participant) {
+        trip = getTripById(participant.trip_id);
     }
 
-    const trip = getTripById(participant.trip_id);
+    // Fallback: extension participant ID (SHA256 of iMessage UUID) won't match
+    // BlueBubbles sender IDs (phone/email). Find the most recent trip instead.
     if (!trip) {
-        return res.json({ hasTrip: false });
+        trip = getDb().prepare(
+            'SELECT * FROM trips ORDER BY created_at DESC LIMIT 1'
+        ).get();
+
+        if (!trip) {
+            return res.json({ hasTrip: false });
+        }
+
+        // Auto-link this extension participant ID to the trip
+        if (!participant) {
+            const existingInTrip = getDb().prepare(
+                'SELECT * FROM participants WHERE sender_id = ? AND trip_id = ?'
+            ).get(participantId, trip.id);
+            if (!existingInTrip) {
+                createParticipant(trip.id, participantId, participantId, 'member');
+            }
+            participant = getDb().prepare(
+                'SELECT * FROM participants WHERE sender_id = ? AND trip_id = ?'
+            ).get(participantId, trip.id);
+        }
     }
 
     // Participants
@@ -360,6 +376,9 @@ app.get('/participant/:participantId/dashboard', (req, res) => {
         }
     }
 
+    const organizer = allParticipants.find(p => p.role === 'organizer');
+    const roughSchedule = trip.rough_schedule ? JSON.parse(trip.rough_schedule) : null;
+
     res.json({
         hasTrip: true,
         sessionId: trip.chat_id,
@@ -369,6 +388,9 @@ app.get('/participant/:participantId/dashboard', (req, res) => {
             startDate: trip.start_date,
             endDate: trip.end_date,
             stage: trip.stage,
+            freeDayCount: trip.free_day_count,
+            organizer: organizer?.name || null,
+            roughSchedule,
         },
         participants: allParticipants.map(p => ({ name: p.name, role: p.role })),
         itinerary: itinerary.map(day => ({
@@ -408,16 +430,38 @@ app.get('/participant/:participantId/dashboard', (req, res) => {
 app.get('/participant/:participantId/active', (req, res) => {
     const { participantId } = req.params;
 
-    // Find all trips this participant is in
-    const participant = getDb().prepare(
+    let participant = getDb().prepare(
         'SELECT * FROM participants WHERE sender_id = ? ORDER BY created_at DESC LIMIT 1'
     ).get(participantId);
 
-    if (!participant) {
-        return res.json({ hasTrip: false, activePoll: null, needsPreferences: false });
+    let trip;
+    if (participant) {
+        trip = getTripById(participant.trip_id);
     }
 
-    const trip = getTripById(participant.trip_id);
+    // Fallback: find most recent trip (extension ID won't match BB handles)
+    if (!trip) {
+        trip = getDb().prepare(
+            'SELECT * FROM trips ORDER BY created_at DESC LIMIT 1'
+        ).get();
+
+        if (!trip) {
+            return res.json({ hasTrip: false, activePoll: null, needsPreferences: false });
+        }
+
+        if (!participant) {
+            const existingInTrip = getDb().prepare(
+                'SELECT * FROM participants WHERE sender_id = ? AND trip_id = ?'
+            ).get(participantId, trip.id);
+            if (!existingInTrip) {
+                createParticipant(trip.id, participantId, participantId, 'member');
+            }
+            participant = getDb().prepare(
+                'SELECT * FROM participants WHERE sender_id = ? AND trip_id = ?'
+            ).get(participantId, trip.id);
+        }
+    }
+
     if (!trip) {
         return res.json({ hasTrip: false, activePoll: null, needsPreferences: false });
     }
@@ -462,6 +506,7 @@ app.get('/participant/:participantId/active', (req, res) => {
     const prefAgg = getAggregatedPreferences(trip.id);
     const allParticipants = getParticipantsByTripId(trip.id);
 
+    const organizer2 = allParticipants.find(p => p.role === 'organizer');
     res.json({
         hasTrip: true,
         sessionId: trip.chat_id,
@@ -471,6 +516,9 @@ app.get('/participant/:participantId/active', (req, res) => {
             startDate: trip.start_date,
             endDate: trip.end_date,
             stage: trip.stage,
+            freeDayCount: trip.free_day_count,
+            organizer: organizer2?.name || null,
+            roughSchedule: trip.rough_schedule ? JSON.parse(trip.rough_schedule) : null,
         },
         activePoll: pollData,
         needsPreferences: needsPrefs,
@@ -538,6 +586,7 @@ app.get('/session/:sessionId/active', (req, res) => {
     const prefAgg = getAggregatedPreferences(trip.id);
     const allParticipants = getParticipantsByTripId(trip.id);
 
+    const organizer3 = allParticipants.find(p => p.role === 'organizer');
     res.json({
         hasTrip: true,
         trip: {
@@ -546,6 +595,9 @@ app.get('/session/:sessionId/active', (req, res) => {
             startDate: trip.start_date,
             endDate: trip.end_date,
             stage: trip.stage,
+            freeDayCount: trip.free_day_count,
+            organizer: organizer3?.name || null,
+            roughSchedule: trip.rough_schedule ? JSON.parse(trip.rough_schedule) : null,
         },
         activePoll: pollData,
         needsPreferences,
