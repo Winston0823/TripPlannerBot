@@ -7,7 +7,30 @@
 		<key>TripPlanner MessagesExtension.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
+			<integer>1</integer>
+		</dict>
+		<key>TripPlanner.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
 			<integer>0</integer>
+		</dict>
+		<key>TripPlannerCurator.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>2</integer>
+		</dict>
+	</dict>
+	<key>SuppressBuildableAutocreation</key>
+	<dict>
+		<key>3A4E02FA2F77BCBD00A5FEBE</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>3A4E03032F77BCBF00A5FEBE</key>
+		<dict>
+			<key>primary</key>
+			<true/>
 		</dict>
 	</dict>
 </dict>
