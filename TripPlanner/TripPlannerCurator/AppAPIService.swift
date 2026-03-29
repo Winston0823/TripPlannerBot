@@ -3,7 +3,7 @@ import Foundation
 class AppAPIService {
     static let shared = AppAPIService()
 
-    private let baseURL = "https://glorious-nourishment-production.up.railway.app"
+    private let baseURL = "https://adjunctively-decongestive-leta.ngrok-free.dev"
 
     // MARK: - Models
 

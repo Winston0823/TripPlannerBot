@@ -58,8 +58,8 @@ class APIService {
         if let url = ProcessInfo.processInfo.environment["API_BASE_URL"], !url.isEmpty {
             return url
         }
-        // Fallback: Railway production URL
-        return "https://glorious-nourishment-production.up.railway.app"
+        // Fallback: ngrok tunnel to bot's Mac
+        return "https://adjunctively-decongestive-leta.ngrok-free.dev"
     }()
 
     private let useMock = false
