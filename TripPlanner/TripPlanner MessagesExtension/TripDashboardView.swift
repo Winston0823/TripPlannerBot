@@ -37,6 +37,11 @@ struct TripDashboardView: View {
                     tripHeader(trip, participants: dash.participants ?? [])
                 }
 
+                // Planning Progress
+                if let trip = dash.trip, let stage = trip.stage {
+                    planningProgressSection(stage: stage)
+                }
+
                 // Active actions
                 if let prefs = dash.preferences, prefs.needsSubmission {
                     actionCard(icon: "slider.horizontal.3", title: "Share Your Preferences",
@@ -60,6 +65,11 @@ struct TripDashboardView: View {
                 // Preferences Chart
                 if let prefs = dash.preferences, prefs.responseCount > 0 {
                     PreferenceChartView(preferences: prefs)
+                }
+
+                // Stops
+                if let stops = dash.stops, !stops.isEmpty {
+                    stopsSection(stops)
                 }
 
                 // Itinerary
@@ -114,6 +124,15 @@ struct TripDashboardView: View {
                             Image(systemName: "calendar")
                                 .foregroundColor(.secondary)
                             Text("\(start) → \(end)")
+                                .font(Theme.captionFont)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    if let organizer = trip.organizer {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.fill")
+                                .foregroundColor(.secondary)
+                            Text("Organized by \(organizer)")
                                 .font(Theme.captionFont)
                                 .foregroundColor(.secondary)
                         }
@@ -211,6 +230,167 @@ struct TripDashboardView: View {
                 .shadow(color: .black.opacity(0.03), radius: 2, y: 1)
                 .padding(.horizontal)
             }
+        }
+    }
+
+    // MARK: - Planning Progress
+
+    private static let stageOrder = ["setup", "preferences", "activity_types", "venues", "day_assignment", "logistics", "review", "booked"]
+    private static let stageLabels: [String: String] = [
+        "setup": "Setup",
+        "preferences": "Preferences",
+        "activity_types": "Activities",
+        "venues": "Venues",
+        "day_assignment": "Schedule",
+        "logistics": "Logistics",
+        "review": "Review",
+        "booked": "Booked",
+    ]
+    private static let stageIcons: [String: String] = [
+        "setup": "gearshape.fill",
+        "preferences": "slider.horizontal.3",
+        "activity_types": "figure.hiking",
+        "venues": "mappin.and.ellipse",
+        "day_assignment": "calendar.badge.clock",
+        "logistics": "car.fill",
+        "review": "checkmark.circle",
+        "booked": "checkmark.seal.fill",
+    ]
+
+    private func planningProgressSection(stage: String) -> some View {
+        let currentIndex = Self.stageOrder.firstIndex(of: stage) ?? 0
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "flag.checkered")
+                    .foregroundColor(Theme.brandColor)
+                Text("Planning Progress")
+                    .font(Theme.headlineFont)
+                Spacer()
+                Text(Self.stageLabels[stage] ?? stage.capitalized)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Theme.brandColor)
+                    .cornerRadius(8)
+            }
+
+            // Stage dots
+            HStack(spacing: 0) {
+                ForEach(Array(Self.stageOrder.enumerated()), id: \.offset) { index, stageKey in
+                    let isDone = index < currentIndex
+                    let isCurrent = index == currentIndex
+
+                    VStack(spacing: 4) {
+                        ZStack {
+                            Circle()
+                                .fill(isDone ? Color.green : isCurrent ? Theme.brandColor : Color(.systemGray4))
+                                .frame(width: 22, height: 22)
+                            Image(systemName: isDone ? "checkmark" : (Self.stageIcons[stageKey] ?? "circle"))
+                                .font(.system(size: isDone ? 10 : 9, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                        Text(Self.stageLabels[stageKey] ?? "")
+                            .font(.system(size: 8, weight: isCurrent ? .bold : .regular))
+                            .foregroundColor(isCurrent ? .primary : .secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    if index < Self.stageOrder.count - 1 {
+                        Rectangle()
+                            .fill(isDone ? Color.green : Color(.systemGray4))
+                            .frame(height: 2)
+                            .frame(maxWidth: .infinity)
+                            .padding(.bottom, 16)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(Theme.cardCornerRadius)
+        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
+        .padding(.horizontal)
+    }
+
+    // MARK: - Stops
+
+    private func stopsSection(_ stops: [APIService.StopInfo]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "mappin.and.ellipse")
+                    .foregroundColor(Theme.brandColor)
+                Text("Stops")
+                    .font(Theme.headlineFont)
+                Spacer()
+                let confirmed = stops.filter { $0.confidence == "confirmed" }.count
+                if confirmed > 0 {
+                    Text("\(confirmed) confirmed")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.green)
+                }
+            }
+            .padding(.horizontal)
+
+            ForEach(stops) { stop in
+                HStack(spacing: 10) {
+                    // Confidence indicator
+                    Circle()
+                        .fill(stopColor(stop.confidence))
+                        .frame(width: 10, height: 10)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(stop.name)
+                            .font(.system(size: 14, weight: .semibold))
+                        HStack(spacing: 8) {
+                            if let day = stop.dayNumber {
+                                Text("Day \(day)")
+                                    .font(Theme.captionFont)
+                                    .foregroundColor(.secondary)
+                            }
+                            Text(stopLabel(stop.confidence))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(stopColor(stop.confidence))
+                        }
+                    }
+
+                    Spacer()
+
+                    if stop.confidence == "confirmed" {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 16))
+                    } else if stop.confidence == "proposed" {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 16))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color(.systemBackground))
+                .cornerRadius(Theme.cardCornerRadius)
+                .shadow(color: .black.opacity(0.03), radius: 2, y: 1)
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    private func stopColor(_ confidence: String?) -> Color {
+        switch confidence {
+        case "confirmed": return .green
+        case "proposed": return .orange
+        default: return .secondary
+        }
+    }
+
+    private func stopLabel(_ confidence: String?) -> String {
+        switch confidence {
+        case "confirmed": return "Confirmed"
+        case "proposed": return "Proposed"
+        default: return "Open"
         }
     }
 
