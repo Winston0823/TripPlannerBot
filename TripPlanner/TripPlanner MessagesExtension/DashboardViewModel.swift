@@ -5,6 +5,7 @@ import Combine
 class DashboardViewModel: ObservableObject {
     @Published var state: ViewState = .loading
     @Published var dashboard: APIService.DashboardResponse?
+    @Published var showJoinNew = false
 
     let participantID: String
 

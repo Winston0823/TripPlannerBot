@@ -15,7 +15,12 @@ struct TripDashboardView: View {
             case .error(let msg):
                 errorView(msg)
             case .loaded:
-                if let dash = viewModel.dashboard, dash.hasTrip {
+                if viewModel.showJoinNew {
+                    JoinTripView(participantID: viewModel.participantID) {
+                        viewModel.showJoinNew = false
+                        Task { await viewModel.load() }
+                    }
+                } else if let dash = viewModel.dashboard, dash.hasTrip {
                     dashboardContent(dash)
                 } else {
                     noTripView
@@ -98,6 +103,13 @@ struct TripDashboardView: View {
                         .cornerRadius(Theme.buttonCornerRadius)
                 }
                 .padding(.horizontal)
+
+                // Join different trip
+                Button(action: { viewModel.showJoinNew = true }) {
+                    Label("Join a Different Trip", systemImage: "plus.circle")
+                        .font(Theme.bodyFont)
+                        .foregroundColor(Theme.brandColor)
+                }
                 .padding(.bottom, 20)
             }
             .padding(.top)
