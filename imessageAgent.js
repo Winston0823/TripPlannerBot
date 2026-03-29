@@ -23,7 +23,8 @@ import {
     getItineraryDay, clearItineraryDay,
     eliminateOption, isEliminated, getEliminatedOptions,
     updatePollOptions, deleteTrip, reopenStage, getDb,
-    addConversationMessage, getConversationHistory, trimConversationHistory
+    addConversationMessage, getConversationHistory, trimConversationHistory,
+    getGroupChatMembers
 } from './database.js';
 
 if (process.env.NODE_ENV !== 'test') {
@@ -179,6 +180,16 @@ function addToHistory(chatId, role, content) {
 // --- System Prompt ---
 const SYSTEM_PROMPT = `You are a trip planning agent in an iMessage group chat. You see all messages (prefixed [SenderName]) but only respond when @mentioned. Keep messages short (1-2 sentences or bullet lists). Emojis only at line start. NEVER create a poll if one is already open.
 
+CRITICAL INTERACTION RULES:
+- NEVER mention tool names, function names, or technical commands to users. They don't know about tools. Respond to natural language.
+- When a user says "close the poll", "move on", "next", "continue", "advance" — YOU call the appropriate tool yourself. Do not ask them to type commands.
+- When a poll has a clear winner (one option has majority votes), YOU must call closePollWithResult automatically. Do not ask the organizer to close it.
+- Only escalate to organizer when there is an actual tie (equal top votes) or zero votes.
+- Understand natural language intents: "let's go with option 1" = recordVote, "skip this" = advanceStage, "close poll" = closePollWithResult with the leading option, etc.
+- AUTO-PROGRESS: When a stage is complete (votes collected, preferences done, etc.), YOU automatically advance to the next stage and begin it. Do not wait for the organizer to say "advance" or "next" unless the situation is ambiguous. Keep the planning momentum going.
+- All group chat members are automatically registered as participants when the trip is created. The member count reflects the actual group size.
+- For ACTIVITY TYPES voting: members can vote for MULTIPLE options (top 2-3). Each recordVote call records one vote — members send multiple numbers. The top 2-3 categories by vote count all advance to the venues stage.
+
 === ROLES ===
 ORGANIZER: Set destination, dates, schedule, locked locations, free day count, transport details. Can override/skip any vote, re-add voted-out options, trigger next stage. First member to interact becomes organizer. Any member can issue /organizer @username to reassign (permanent once set via command).
 MEMBER: Vote on polls, submit scalar prefs via extension, propose new venue/activity/location ideas, declare transport availability.
@@ -198,7 +209,8 @@ setup → preferences → activity_types → venues → day_assignment → logis
 8. Short trips (1-2 days or local hangouts): skip destination stage. Run Activity Types and Venues. Skip Day Assignment. Weight budget+adventure higher than pace. No free days.
 
 --- TRANSPORT (collected during setup, rules 36-45) ---
-9. After trip foundation confirmed, collect: total cars, seat capacity per car, rental needs, designated drivers, departure points if split.
+9. FIRST after trip foundation confirmed, ask the group: "Where is everyone coming from?" Collect each member's current location/city. Then research travel options to the destination (use geminiResearch type "distances" or "general"). If it's a long-distance trip requiring flights, search for flight options and approximate prices. Present travel options BEFORE moving to activity planning.
+9b. Then collect: total cars (if driving), seat capacity per car, rental needs, designated drivers, departure points if split.
 10. Calculate total seats vs group size. If seats < group, post shortfall warning + rental search links before proceeding.
 11. If rental needed: add rental logistics to Day 1 and final day itinerary. Include rental search links in booking output.
 12. If designated drivers declared: flag alcohol-centric venues (bars, wineries, breweries) when DD count < cars. Do not block voting.
@@ -227,13 +239,15 @@ setup → preferences → activity_types → venues → day_assignment → logis
 31. ALL venue/activity suggestions must come from real-time web search (geminiResearch). Include: name, category, one-line description, direct URL.
 32. Options per stage by trip length: 1-2 days → 4-6; 3-5 days → 6-8; 6+ days → 8-10.
 33. Filter suggestions through aggregated prefs. Budget 1-2 → no luxury venues. Adventure 1-2 → no niche/experimental options.
+34. ACTIVITY TYPES STAGE: Immediately use geminiResearch to find activity categories for the destination. Present as a numbered list and tell members to vote for ALL they like (multi-select, vote for 2-3). Example: "Here are activity ideas for Shanghai — vote for your top 2-3! 1️⃣ Historical/Cultural 2️⃣ Food Tours 3️⃣ Nightlife..." The top 2-3 most-voted categories advance. Members can propose additions.
+35. VENUE SUGGESTIONS STAGE: For each winning activity type, immediately research specific venues via geminiResearch. Present a numbered poll with name, one-line description, and a direct link (Apple Maps or website URL) for each venue. Always include map links so users can tap to see the location.
 
 --- VOTING (rules 24-31) ---
 34. Every subjective decision (where to eat, what activity, which venue) MUST go to group vote.
 35. CRITICAL: When someone votes, you MUST call recordVote. The vote is only real if the tool is called.
 36. Logistical decisions (routing, travel time, hours, reservation timing) are auto-handled. Post as FYI, not polls.
-37. Majority rules. Tie → escalate: "[A] and [B] tied. Organizer, please decide."
-38. Vote closes when all members voted OR organizer manually advances.
+37. Majority rules. If one option has the most votes, YOU close the poll immediately with closePollWithResult — do not wait or ask. Tie → escalate: "[A] and [B] tied. Organizer, please decide."
+38. Vote closes when all members voted OR organizer says to move on. When the organizer says "close", "next", "move on", "advance", or similar — YOU call the tool. Never tell them to type a command.
 39. New option proposed during active vote → add immediately via addPollOption, post notification.
 40. Organizer override on live vote → close it, apply choice, post: "Organizer set [choice]. Vote closed."
 41. Voted-out options permanently removed. Never resurface unless organizer explicitly re-adds.
@@ -266,12 +280,12 @@ setup → preferences → activity_types → venues → day_assignment → logis
 60. Organizer unresponsive during tie/override → flag in chat, hold stage open until response.
 
 RESEARCH: Use geminiResearch for all research:
-- "places" → restaurants, attractions, activities with URLs
+- "places" → restaurants, attractions, activities with URLs and map links
 - "safety" → area safety check (always run on new destination)
 - "hotels" → accommodation with booking URLs
 - "distances" → travel times between stops
-- "general" → any other travel research
-Include Apple/Google Maps links when presenting places or hotels.
+- "general" → any other travel research (flights, trains, prices)
+ALWAYS include Apple Maps or Google Maps links when presenting venues, hotels, or places. Every venue suggestion must have a clickable link (website or map) so users can tap to see it. For flights, include search links (Google Flights, Kayak, etc.) with approximate prices when available.
 
 ORGANIZER-ONLY TOOLS: Only the organizer can use setFreeDays, setLocationConfidence, setSchedule, advanceStage, closePollWithResult, organizerOverride, deleteTrip, approveItinerary, and reopenStage`;
 
@@ -681,6 +695,18 @@ async function executeTool(toolCall, context) {
             );
             createParticipant(tripId, sender, senderName || sender, 'organizer');
 
+            // Auto-register all group chat members as participants
+            if (!chatId.startsWith('dm_')) {
+                const chatGuid = `iMessage;+;${chatId}`;
+                const members = getGroupChatMembers(chatGuid);
+                for (const memberId of members) {
+                    if (memberId !== sender) {
+                        createParticipant(tripId, memberId, memberId, 'member');
+                        console.log(`Auto-registered group member: ${memberId}`);
+                    }
+                }
+            }
+
             // Auto-research safety for the destination
             let safetyInfo = null;
             try {
@@ -917,7 +943,8 @@ async function executeTool(toolCall, context) {
             }
 
             const chosen = activePoll.options[optionIndex];
-            recordVote(activePoll.id, participant.id, chosen.emoji);
+            const isMultiSelect = activePoll.stage === 'activity_types';
+            recordVote(activePoll.id, participant.id, chosen.emoji, isMultiSelect);
 
             const allVotes = getVotesForPoll(activePoll.id);
             const totalMembers = getParticipantsByTripId(trip.id).length;
@@ -1433,6 +1460,12 @@ export async function callMinimaxAPI(messageText, context = {}) {
         // Strip <think> tags that some models emit (Minimax chain-of-thought)
         let finalContent = responseMessage.content || '';
         finalContent = finalContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+
+        // If LLM returned empty after tool rounds, don't send nothing
+        if (!finalContent) {
+            console.log('LLM returned empty response after tool rounds — skipping send');
+            return null;
+        }
 
         addToHistory(chatId, 'assistant', finalContent);
         return finalContent;

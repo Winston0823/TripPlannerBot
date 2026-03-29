@@ -378,13 +378,24 @@ export const getActivePollByChatId = (chatId) => {
 };
 
 export const closePoll = (poll_id, winning_option = null) => {
-    const stmt = db.prepare('UPDATE polls SET status = "closed", winning_option = ? WHERE id = ?');
+    const stmt = db.prepare("UPDATE polls SET status = 'closed', winning_option = ? WHERE id = ?");
     return stmt.run(winning_option, poll_id);
 };
 
 // --- Votes ---
 
-export const recordVote = (poll_id, participant_id, option_emoji) => {
+export const recordVote = (poll_id, participant_id, option_emoji, allow_multi = false) => {
+    if (allow_multi) {
+        // For multi-select polls (activity types): check if already voted for this specific option
+        const existing = db.prepare(
+            'SELECT id FROM votes WHERE poll_id = ? AND participant_id = ? AND option_emoji = ?'
+        ).get(poll_id, participant_id, option_emoji);
+        if (existing) return existing; // Already voted for this option
+        return db.prepare(
+            'INSERT INTO votes (poll_id, participant_id, option_emoji) VALUES (?, ?, ?)'
+        ).run(poll_id, participant_id, option_emoji);
+    }
+    // Single-select: upsert (replace previous vote)
     const stmt = db.prepare(
         `INSERT INTO votes (poll_id, participant_id, option_emoji)
          VALUES (?, ?, ?)
@@ -588,6 +599,28 @@ export const deleteTrip = (trip_id) => {
     db.prepare('DELETE FROM eliminated_options WHERE trip_id = ?').run(trip_id);
     db.prepare('DELETE FROM participants WHERE trip_id = ?').run(trip_id);
     db.prepare('DELETE FROM trips WHERE id = ?').run(trip_id);
+};
+
+// --- Group Chat Members (from iMessage DB) ---
+
+export const getGroupChatMembers = (chatGuid) => {
+    try {
+        const chatDb = new Database(
+            require('path').join(require('os').homedir(), 'Library/Messages/chat.db'),
+            { readonly: true }
+        );
+        const members = chatDb.prepare(`
+            SELECT h.id FROM handle h
+            JOIN chat_handle_join chj ON h.ROWID = chj.handle_id
+            JOIN chat c ON c.ROWID = chj.chat_id
+            WHERE c.guid = ?
+        `).all(chatGuid);
+        chatDb.close();
+        return members.map(m => m.id);
+    } catch (err) {
+        console.error('Failed to read group members from chat.db:', err.message);
+        return [];
+    }
 };
 
 // --- Conversation History ---
