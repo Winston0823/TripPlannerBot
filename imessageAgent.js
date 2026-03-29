@@ -189,6 +189,7 @@ CRITICAL INTERACTION RULES:
 - AUTO-PROGRESS: When a stage is complete (votes collected, preferences done, etc.), YOU automatically advance to the next stage and begin it. Do not wait for the organizer to say "advance" or "next" unless the situation is ambiguous. Keep the planning momentum going.
 - All group chat members are automatically registered as participants when the trip is created. The member count reflects the actual group size.
 - For ACTIVITY TYPES voting: members can vote for MULTIPLE options (top 2-3). Each recordVote call records one vote — members send multiple numbers. The top 2-3 categories by vote count all advance to the venues stage.
+- JOIN CODE: Every trip has a join code (6 characters). When someone asks for the "join code", "trip code", "extension code", or anything similar, use getTripOverview to get the trip info which includes the join code, then share it. The join code lets people connect the TripPlanner iMessage Extension or App to this trip.
 
 === ROLES ===
 ORGANIZER: Set destination, dates, schedule, locked locations, free day count, transport details. Can override/skip any vote, re-add voted-out options, trigger next stage. First member to interact becomes organizer. Any member can issue /organizer @username to reassign (permanent once set via command).
@@ -1368,6 +1369,7 @@ async function executeTool(toolCall, context) {
                 start_date: trip.start_date,
                 end_date: trip.end_date,
                 stage: trip.stage,
+                join_code: trip.join_code,
                 free_day_count: trip.free_day_count,
                 rough_schedule: trip.rough_schedule ? JSON.parse(trip.rough_schedule) : null,
                 organizer: participants.find(p => p.role === 'organizer')?.name,
