@@ -426,17 +426,9 @@ struct TripDashboardView: View {
     }
 
     private var noTripView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "airplane.circle")
-                .font(.system(size: 48))
-                .foregroundColor(.secondary)
-            Text("No trip planned yet")
-                .font(Theme.headlineFont)
-            Text("Ask the bot to create a trip!")
-                .font(Theme.bodyFont)
-                .foregroundColor(.secondary)
+        JoinTripView(participantID: viewModel.participantID) {
+            Task { await viewModel.load() }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func errorView(_ msg: String) -> some View {

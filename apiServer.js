@@ -12,6 +12,7 @@ import {
     getItinerary,
     getStopsByTripId,
     getDb,
+    getTripByJoinCode,
     addConversationMessage, getConversationHistory, trimConversationHistory
 } from './database.js';
 
@@ -281,6 +282,38 @@ app.post('/chat', async (req, res) => {
         console.error('Chat API error:', error.message);
         res.status(500).json({ error: 'AI service unavailable' });
     }
+});
+
+// --- Join trip with code (Extension links user to trip) ---
+app.post('/trip/join', (req, res) => {
+    const { joinCode, participantID, name } = req.body;
+
+    if (!joinCode || !participantID) {
+        return res.status(400).json({ error: 'joinCode and participantID are required' });
+    }
+
+    const trip = getTripByJoinCode(joinCode.toUpperCase());
+    if (!trip) {
+        return res.status(404).json({ error: 'Invalid join code' });
+    }
+
+    // Add this Extension user as a participant
+    const displayName = name || `User-${participantID.substring(0, 6)}`;
+    createParticipant(trip.id, participantID, displayName);
+
+    res.json({
+        success: true,
+        tripId: trip.id,
+        tripName: trip.name,
+        destination: trip.destination,
+    });
+});
+
+// --- Get join code for a trip ---
+app.get('/session/:sessionId/join-code', (req, res) => {
+    const trip = getTripFromSession(req.params.sessionId);
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    res.json({ joinCode: trip.join_code });
 });
 
 // --- Dashboard endpoint (Extension main view) ---

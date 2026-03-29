@@ -247,6 +247,21 @@ function migrate() {
         }
         setSchemaVersion(2);
     }
+
+    if (version < 3) {
+        const tripCols = db.prepare("PRAGMA table_info(trips)").all().map(c => c.name);
+        if (!tripCols.includes('join_code')) {
+            db.exec(`ALTER TABLE trips ADD COLUMN join_code TEXT`);
+            // Generate join codes for existing trips
+            const trips = db.prepare('SELECT id FROM trips WHERE join_code IS NULL').all();
+            const updateStmt = db.prepare('UPDATE trips SET join_code = ? WHERE id = ?');
+            for (const trip of trips) {
+                const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+                updateStmt.run(code, trip.id);
+            }
+        }
+        setSchemaVersion(3);
+    }
 }
 
 initializeDatabase();
@@ -258,12 +273,17 @@ initializeDatabase();
 // --- Trips ---
 
 export const createTrip = (chat_id, name, destination, start_date, end_date, organizer_sender_id) => {
+    const join_code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const stmt = db.prepare(
-        `INSERT INTO trips (chat_id, name, destination, start_date, end_date, organizer_sender_id, stage)
-         VALUES (?, ?, ?, ?, ?, ?, 'setup')`
+        `INSERT INTO trips (chat_id, name, destination, start_date, end_date, organizer_sender_id, stage, join_code)
+         VALUES (?, ?, ?, ?, ?, ?, 'setup', ?)`
     );
-    const info = stmt.run(chat_id, name, destination, start_date, end_date, organizer_sender_id);
+    const info = stmt.run(chat_id, name, destination, start_date, end_date, organizer_sender_id, join_code);
     return info.lastInsertRowid;
+};
+
+export const getTripByJoinCode = (join_code) => {
+    return db.prepare('SELECT * FROM trips WHERE join_code = ?').get(join_code);
 };
 
 export const getTripByChatId = (chat_id) => {

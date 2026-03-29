@@ -167,6 +167,33 @@ class APIService {
         let preferenceStatus: PreferenceSummary?
     }
 
+    // MARK: - Join Trip
+
+    struct JoinResult: Codable {
+        let success: Bool?
+        let error: String?
+        let tripName: String?
+        let destination: String?
+    }
+
+    func joinTrip(joinCode: String, participantID: String, name: String?) async throws -> JoinResult {
+        if useMock { return JoinResult(success: true, error: nil, tripName: "Tokyo Trip", destination: "Tokyo, Japan") }
+
+        var request = URLRequest(url: URL(string: "\(baseURL)/trip/join")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        struct JoinBody: Codable { let joinCode: String; let participantID: String; let name: String? }
+        request.httpBody = try JSONEncoder().encode(JoinBody(joinCode: joinCode, participantID: participantID, name: name))
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+            let errorResult = try? JSONDecoder().decode(JoinResult.self, from: data)
+            return JoinResult(success: false, error: errorResult?.error ?? "Failed to join", tripName: nil, destination: nil)
+        }
+        return try JSONDecoder().decode(JoinResult.self, from: data)
+    }
+
     func getActiveSession(participantID: String) async throws -> ActiveSession {
         if useMock { return mockActiveSession() }
 

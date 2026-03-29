@@ -721,6 +721,10 @@ async function executeTool(toolCall, context) {
                 // Safety check failed — non-blocking, continue
             }
 
+            // Get the join code for the Extension
+            const createdTrip = getTripByChatId(chatId);
+            const joinCode = createdTrip?.join_code || '';
+
             return JSON.stringify({
                 success: true, tripId,
                 name: args.name, destination: args.destination,
@@ -728,8 +732,9 @@ async function executeTool(toolCall, context) {
                 end_date: args.end_date || null,
                 organizer: senderName || sender,
                 stage: 'setup',
+                joinCode,
                 safety: safetyInfo,
-                message: 'Trip created. You are the organizer. Share the safety summary with the group, then ask about optional setup: free day count, must-visit stops, or rough schedule. Say "done with setup" when ready.',
+                message: `Trip created. You are the organizer. Join code for the TripPlanner app: ${joinCode}\n\nShare the safety summary with the group, then ask about optional setup: free day count, must-visit stops, or rough schedule. Say "done with setup" when ready.`,
             });
         }
 
