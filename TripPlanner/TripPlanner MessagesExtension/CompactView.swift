@@ -25,8 +25,10 @@ class CompactViewModel: ObservableObject {
 struct CompactView: View {
     @StateObject var viewModel: CompactViewModel
     var onOpenDashboard: () -> Void
+    var onJoinNew: () -> Void
 
     var body: some View {
+      VStack(spacing: 0) {
         Button(action: onOpenDashboard) {
             if let dash = viewModel.dashboard, dash.hasTrip, let trip = dash.trip {
                 HStack(spacing: 10) {
@@ -107,9 +109,25 @@ struct CompactView: View {
             }
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
-        .task { await viewModel.load() }
+        .frame(maxWidth: .infinity)
+
+        // Join different trip button
+        if viewModel.loaded && viewModel.dashboard?.hasTrip == true {
+            Button(action: onJoinNew) {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 12))
+                    Text("Join New Trip")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(Theme.brandColor)
+                .padding(.bottom, 6)
+            }
+        }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color(.systemBackground))
+    .task { await viewModel.load() }
     }
 
     private func daysUntil(_ dateStr: String) -> Int? {

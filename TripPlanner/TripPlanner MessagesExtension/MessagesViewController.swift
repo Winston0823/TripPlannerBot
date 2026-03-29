@@ -12,6 +12,8 @@ import CryptoKit
 
 class MessagesViewController: MSMessagesAppViewController {
 
+    private var pendingJoinNew = false
+
     // MARK: - Lifecycle
 
     override func willBecomeActive(with conversation: MSConversation) {
@@ -48,14 +50,21 @@ class MessagesViewController: MSMessagesAppViewController {
         // Compact: show trip preview
         if style == .compact {
             let vm = CompactViewModel(participantID: participantID)
-            show(CompactView(viewModel: vm) { [weak self] in
+            show(CompactView(viewModel: vm, onOpenDashboard: { [weak self] in
                 self?.requestPresentationStyle(.expanded)
-            })
+            }, onJoinNew: { [weak self] in
+                self?.pendingJoinNew = true
+                self?.requestPresentationStyle(.expanded)
+            }))
             return
         }
 
         // Expanded: show trip dashboard
         let vm = DashboardViewModel(participantID: participantID)
+        if pendingJoinNew {
+            vm.showJoinNew = true
+            pendingJoinNew = false
+        }
         show(TripDashboardView(
             viewModel: vm,
             onShowPreferences: { [weak self] sid, pid in
